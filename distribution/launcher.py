@@ -19,6 +19,31 @@ from common import atomic_json, available_port, compose_config, new_state, read_
 from docker_runtime import ensure_docker, powershell, run
 
 
+def configure_stdio():
+    """Force UTF-8 output before any Chinese message reaches a Windows pipe/console.
+
+    GitHub Actions and other non-console callers inherit a cp1252/charmap stdout;
+    printing Chinese then raises UnicodeEncodeError before verification can run.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+        except Exception:
+            pass
+
+
+configure_stdio()
+
+
 def bundle_directory():
     return Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
 
