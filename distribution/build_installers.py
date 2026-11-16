@@ -27,17 +27,51 @@ def fetch(url, destination):
     partial.replace(destination)
 
 
+def _windows_powershell_module_path():
+    """Standard Windows PowerShell 5.1 module paths, independent of the caller's PSModulePath."""
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    user_profile = os.environ.get("USERPROFILE", "")
+    parts = [
+        os.path.join(system_root, "system32", "WindowsPowerShell", "v1.0", "Modules"),
+        os.path.join(program_files, "WindowsPowerShell", "Modules"),
+    ]
+    if user_profile:
+        parts.append(os.path.join(user_profile, "Documents", "WindowsPowerShell", "Modules"))
+    return os.pathsep.join(parts)
+
+
 def verify_windows_signature(path, publisher):
     env = os.environ.copy()
     env.update(EL_INSTALLER_PATH=str(path.resolve()), EL_INSTALLER_PUBLISHER=publisher)
     script = r"""
 $ErrorActionPreference='Stop'
+Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
 $s=Get-AuthenticodeSignature -LiteralPath $env:EL_INSTALLER_PATH
-if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch $env:EL_INSTALLER_PUBLISHER) { throw 'Installer signature/publisher verification failed' }
+if ($s.Status -ne 'Valid' -or $null -eq $s.SignerCertificate -or $s.SignerCertificate.Subject -notmatch $env:EL_INSTALLER_PUBLISHER) { throw 'Installer signature/publisher verification failed' }
 [string](Get-Item -LiteralPath $env:EL_INSTALLER_PATH).VersionInfo.ProductVersion
 """
-    return subprocess.check_output(["powershell.exe", "-NoProfile", "-Command", script], env=env,
-                                   encoding="utf-8", errors="replace", timeout=120).strip()
+    # windows-2022 can inherit a PSModulePath that omits the Windows PowerShell
+    # modules directory, making Get-AuthenticodeSignature fail to autoload
+    # Microsoft.PowerShell.Security. Try PowerShell 7 first, then Windows
+    # PowerShell with the standard module paths pinned.
+    candidates = [p for p in (shutil.which("pwsh.exe"), shutil.which("powershell.exe")) if p]
+    if not candidates:
+        candidates = ["powershell.exe"]
+    last_error = None
+    for executable in candidates:
+        run_env = env.copy()
+        if os.path.basename(executable).lower() == "powershell.exe":
+            run_env["PSModulePath"] = _windows_powershell_module_path()
+        try:
+            return subprocess.check_output(
+                [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+                env=run_env, encoding="utf-8", errors="replace", timeout=120).strip()
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            print("Signature verification failed with " + executable + "; retrying if possible", flush=True)
+    raise last_error
+
 
 
 def prepare(system, arch, cache):
