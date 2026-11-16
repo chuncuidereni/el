@@ -1,0 +1,183 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 【文件职责】维护同步任务定义、映射配置和运行状态的 MyBatis SQL 映射。
+     修改语句时需同步检查参数名、结果映射、列名、排序和事务语义；SQL 内容本身不应由注释改动。 -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  同步任务表(el_sync_tasks)的 MyBatis 映射。namespace 对应 com.el2ck.mapper.sync.SyncTaskMapper,
+  每个语句的 id 对应该接口的方法名。
+
+  ⚠️ 本文件里的 SQL 有两条不能按字面理解的约定(由 repository/metadata/MetadataSqlDialect.mysql()
+     在驱动边界统一改写,编辑本文件时必须遵守,否则会在运行期报表不存在或语法错误):
+       1) 表名写「逻辑名」:这里写 sync_tasks,实际执行时被改写为 el_sync_tasks。
+          不要在 SQL 里自己写 el_ 前缀,也不要新增未在 MetadataSqlDialect.TABLES 登记的表;
+       2) 时间函数沿用一个旧写法 datetime('now'),执行前会被改写为 UTC_TIMESTAMP()
+          (库内时间统一按 UTC 存取,见 MysqlMetadataDataSource 的 time_zone 设置)。
+     另外 ON CONFLICT / INSERT OR IGNORE 等 SQLite 语法也会被改写,新写语句请沿用同批语句的写法。
+-->
+<mapper namespace="com.el2ck.mapper.sync.SyncTaskMapper">
+
+    <select id="findSourceReference" resultType="java.lang.Long" flushCache="true" useCache="false">
+        SELECT id FROM sync_tasks WHERE data_source_id=#{sourceId} LIMIT 1
+    </select>
+
+    <!--
+      公共列清单:list / getById 等 SELECT 共用的字段集,避免各语句重复维护列名。
+      这里的 AS 不是装饰:多个列名与实体属性名对不上(cron_expr↔cronExpression、is_ods↔ods、
+      sorting_keys↔sortingKeysJson、primary_keys↔primaryKeysJson),驼峰自动映射覆盖不到,
+      必须显式起别名,否则这些属性会读成 null。改列名时须同步实体与 Mapper 接口。
+    -->
+    <sql id="BaseColumns">
+        id, name, description, data_source_id, source_object, connection_id, target_db, target_table,
+        mapping_json, remote_path, file_pattern, has_header, schema_json, mode, schedule_type,
+        cron_expr AS cron_expression, incr_column, order_key, is_ods AS ods, partition_expr, sorting_keys AS sorting_keys_json,
+        primary_keys AS primary_keys_json, phone_column, enabled, truncate, auto_create_table,
+        timeout_minutes, resumable, stable_key, batch_size, created_at, updated_at
+    </sql>
+
+    <!-- 启停同步任务;data_source_id 等其余字段不动。updated_at 用数据库时间,避免依赖应用机器时钟。 -->
+    <update id="setEnabled">
+        UPDATE sync_tasks
+        SET enabled= #{enabled} , updated_at=datetime( 'now' )
+        WHERE id= #{id}
+    </update>
+
+    <!-- 全部任务,最新创建的在前(前端列表页默认顺序)。 -->
+    <select id="list" resultType="com.el2ck.entity.sync.SyncTask">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM sync_tasks
+        ORDER BY id DESC
+    </select>
+
+    <select id="listOwned" resultType="com.el2ck.entity.sync.SyncTask">
+        SELECT <include refid="BaseColumns"/>
+        FROM sync_tasks
+        WHERE id IN (SELECT resource_id FROM el_resource_owners
+                     WHERE resource_type='sync-task' AND owner_user_id=#{ownerId})
+        ORDER BY id DESC
+    </select>
+
+    <!-- LOCATE 使用字面匹配，% 和 _ 不作为通配符；每个词都须匹配，保留原多词搜索语义。 -->
+    <sql id="OwnedPageFilter">
+        WHERE id IN (
+            SELECT t.id FROM sync_tasks t
+            JOIN el_resource_owners o ON o.resource_type='sync-task' AND o.resource_id=t.id
+                                        AND o.owner_user_id=#{ownerId}
+            LEFT JOIN el_resource_owners ds_owner ON ds_owner.resource_type='datasource'
+                AND ds_owner.resource_id=t.data_source_id AND ds_owner.owner_user_id=#{ownerId}
+            LEFT JOIN data_sources d ON d.id=ds_owner.resource_id
+            WHERE 1=1
+            <foreach collection="words" item="word">
+                AND LOCATE(#{word}, LOWER(CONCAT_WS(' ', t.name, t.description, d.name, d.code, d.description,
+                    t.source_object, t.remote_path, t.file_pattern, t.target_db, t.target_table))) &gt; 0
+            </foreach>
+        )
+    </sql>
+
+    <select id="countOwnedPage" resultType="java.lang.Long">
+        SELECT COUNT(*) FROM sync_tasks <include refid="OwnedPageFilter"/>
+    </select>
+
+    <select id="pageOwned" resultType="com.el2ck.entity.sync.SyncTask">
+        SELECT <include refid="BaseColumns"/> FROM sync_tasks
+        <include refid="OwnedPageFilter"/>
+        ORDER BY id DESC LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <!-- 源名称也校验所有权，历史异常引用不能泄露其他用户的数据源信息。 -->
+    <select id="listOwnedDetails" resultType="com.el2ck.entity.sync.SyncTaskListDetails">
+        SELECT t.id AS task_id, d.name AS data_source_name, d.type AS data_source_type,
+               c.name AS connection_name, cp.state_json AS checkpoint_json,
+               EXISTS(SELECT 1 FROM sync_runs q WHERE q.task_id=t.id AND q.status='queued') AS queued
+        FROM sync_tasks t
+        JOIN el_resource_owners o ON o.resource_type='sync-task' AND o.resource_id=t.id
+                                    AND o.owner_user_id=#{ownerId}
+        LEFT JOIN el_resource_owners ds_owner ON ds_owner.resource_type='datasource'
+                    AND ds_owner.resource_id=t.data_source_id AND ds_owner.owner_user_id=#{ownerId}
+        LEFT JOIN data_sources d ON d.id=ds_owner.resource_id
+        LEFT JOIN connections c ON c.id=t.connection_id
+        LEFT JOIN sync_checkpoints cp ON cp.task_id=t.id
+        <if test="taskIds != null">
+            <choose>
+                <when test="taskIds.size() > 0">
+                    WHERE t.id IN <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">#{taskId}</foreach>
+                </when>
+                <otherwise>WHERE 1=0</otherwise>
+            </choose>
+        </if>
+    </select>
+
+    <!-- 周期轮询只查询页内任务及排队标记，不读取映射、源结构或断点 JSON。 -->
+    <select id="listOwnedRuntime" resultType="com.el2ck.entity.sync.SyncTaskListDetails">
+        SELECT t.id AS task_id,
+               EXISTS(SELECT 1 FROM sync_runs q WHERE q.task_id=t.id AND q.status='queued') AS queued
+        FROM sync_tasks t
+        JOIN el_resource_owners o ON o.resource_type='sync-task' AND o.resource_id=t.id AND o.owner_user_id=#{ownerId}
+        <choose>
+            <when test="taskIds != null and taskIds.size() > 0">
+                WHERE t.id IN <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">#{taskId}</foreach>
+            </when>
+            <otherwise>WHERE 1=0</otherwise>
+        </choose>
+    </select>
+
+    <!-- 按主键取单个任务;查不到返回 null(调用方自行判定 404)。 -->
+    <select id="getById" resultType="com.el2ck.entity.sync.SyncTask">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM sync_tasks
+        WHERE id = #{id}
+    </select>
+
+    <!--
+      新建任务。useGeneratedKeys + keyProperty 让 MySQL 生成的自增主键回填到入参对象的 id 上,
+      调用方 insert 之后可直接取 id(建源后立刻同步等场景依赖这一点)。
+      ⚠️ partition_expr / sorting_keys / primary_keys / phone_column 的 IFNULL 默认值不能省:
+         这几个字段在实体里可能是 null,而建表与后续读取约定它们是 '' 或 '[]'(空 JSON 数组),
+         允许写入 NULL 会让下游解析多一条 null 分支。
+    -->
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO sync_tasks (name, description, data_source_id, source_object, connection_id,
+        target_db, target_table, remote_path, file_pattern, has_header, schema_json, mapping_json,
+        mode, schedule_type, cron_expr, incr_column, order_key, is_ods, partition_expr, sorting_keys,
+        primary_keys, phone_column, enabled, truncate, auto_create_table, timeout_minutes, resumable, stable_key, batch_size)
+        VALUES ( #{name} , #{description} , #{dataSourceId} , #{sourceObject} , #{connectionId} ,
+        #{targetDb} , #{targetTable} , #{remotePath} , #{filePattern} , #{hasHeader} , #{schemaJson} ,
+        #{mappingJson} , #{mode} , #{scheduleType} , #{cronExpression} , #{incrColumn} , #{orderKey} ,
+        #{ods} , IFNULL( #{partitionExpr} , '' ), IFNULL( #{sortingKeysJson} , '[]' ), IFNULL( #{primaryKeysJson} ,
+        '[]' ), IFNULL( #{phoneColumn} , '' ), #{enabled} , #{truncate} , #{autoCreateTable},
+        #{timeoutMinutes}, #{resumable}, #{stableKey}, #{batchSize} )
+    </insert>
+
+    <!--
+      整体覆盖一个任务的全部可编辑字段(前端编辑表单提交整份配置,故这里不做字段级增量更新)。
+      IFNULL 默认值与 insert 一致,理由同上。created_at 不在此更新:它是创建时间,不随编辑变化。
+    -->
+    <update id="update">
+        UPDATE sync_tasks
+        SET name= #{name} , description= #{description} , data_source_id= #{dataSourceId} , source_object= #{sourceObject} ,
+        connection_id= #{connectionId} , target_db= #{targetDb} , target_table= #{targetTable} ,
+        mapping_json= #{mappingJson} , remote_path= #{remotePath} , file_pattern= #{filePattern} ,
+        has_header= #{hasHeader} , schema_json= #{schemaJson} , mode= #{mode} , schedule_type= #{scheduleType} ,
+        cron_expr= #{cronExpression} , incr_column= #{incrColumn} , order_key= #{orderKey} , is_ods= #{ods} ,
+        partition_expr=IFNULL( #{partitionExpr} , '' ), sorting_keys=IFNULL( #{sortingKeysJson} ,
+        '[]' ), primary_keys=IFNULL( #{primaryKeysJson} , '[]' ), phone_column=IFNULL( #{phoneColumn} ,
+        '' ), truncate= #{truncate} , auto_create_table= #{autoCreateTable} , enabled= #{enabled} ,
+        timeout_minutes=#{timeoutMinutes}, resumable=#{resumable}, stable_key=#{stableKey}, batch_size=#{batchSize},
+        updated_at=datetime( 'now' )
+        WHERE id= #{id}
+    </update>
+
+    <!--
+      删除任务行。历史运行记录的级联清理不在本语句里,而是由 repository 层
+      MetadataRepository.deleteSyncTask 在本语句之后调用 syncRuns.deleteByTask 完成 ——
+      也就是说单独调用这个 Mapper 方法会留下孤儿运行记录,请走 repository。
+      文件去重记录(sync_files)及断点(sync_checkpoints)也由仓储在同一删除事务中清理。
+    -->
+    <delete id="deleteById">
+        DELETE
+        FROM sync_tasks
+        WHERE id = #{id}
+    </delete>
+</mapper>

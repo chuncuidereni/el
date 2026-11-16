@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 【文件职责】维护同步运行状态、进度、取消请求和中断恢复的 MyBatis SQL 映射。
+     修改语句时需同步检查参数名、结果映射、列名、排序和事务语义；SQL 内容本身不应由注释改动。 -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  同步运行历史表(el_sync_runs)的 MyBatis 映射。namespace 对应 com.el2ck.mapper.sync.SyncRunMapper,
+  语句 id 与接口方法同名(一一对应):insert / finish / finishIfRunning /
+  listByTask / getByTaskAndId / listLatest / countRunning / deleteByTask。
+
+  ⚠️ 本文件的 SQL 有两条不能按字面理解的方言约定(由 repository/metadata/MetadataSqlDialect.mysql()
+     在驱动边界统一改写,编辑时必须遵守,否则运行期会报表不存在或语法错误):
+       1) 表名写「逻辑名」:这里写 sync_runs,实际执行时被改写为 el_sync_runs。
+          不要在 SQL 里自己写 el_ 前缀,也不要新增未在 MetadataSqlDialect.TABLES 登记的表;
+       2) 时间函数沿用旧写法 datetime('now'),执行前会被改写为 UTC_TIMESTAMP()
+          (库内时间统一按 UTC 存取,与连接的 time_zone 设置一致)。
+
+  并发约束由 SyncExecutionGuard 的任务级 MySQL 会话锁负责：先取锁，再创建 running，
+  执行和收尾结束才释放。跨实例恢复也必须取得同一把锁。不得绕过 Service 直接启动运行。
+-->
+<mapper namespace="com.el2ck.mapper.sync.SyncRunMapper">
+    <update id="progress">
+        UPDATE sync_runs SET rows_read=#{rowsRead}, rows_written=#{rowsWritten},
+        progress_json=JSON_MERGE_PATCH(COALESCE(progress_json, '{}'), #{progressJson}),
+        resumed=#{resumed}, checkpoint_from=COALESCE(#{checkpointFrom}, ''), checkpoint_rows=#{checkpointRows}
+        WHERE id=#{id} AND task_id=#{taskId} AND status='running'
+    </update>
+
+    <!--
+      创建一条运行记录。参数 SyncRun r(只用到 taskId);返回受影响行数。
+      状态固定写 'running',started_at 不在此写入,由列默认值 CURRENT_TIMESTAMP 填充。
+      useGeneratedKeys + keyProperty 把自增主键回填到 r.id,调用方 insert 后可直接取 id。
+      副作用:插入一行。
+    -->
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO sync_runs (task_id, status)
+        VALUES ( #{taskId} , 'running' )
+    </insert>
+
+    <!--
+      收尾一次运行:写 status / finished_at / rows_read / rows_written / error。参数 SyncRun r
+      (用到 id/status/rowsRead/rowsWritten/error);返回受影响行数。副作用:更新。
+      WHERE 带 status='running' 守卫,已结束的记录不会被再次覆盖(保留其原状态与行数)。
+      error 用 COALESCE 把 null 归一为空串 —— error 列是 NOT NULL,允许写 null 会插入失败。
+    -->
+    <update id="finish">
+        UPDATE sync_runs
+        SET status= #{status} , finished_at=datetime( 'now' ), rows_read=GREATEST(rows_read, #{rowsRead}), rows_written=GREATEST(rows_written, #{rowsWritten}),
+        error=COALESCE( #{error} , '' ), note=COALESCE( #{note} , '' ),
+        resumed= #{resumed} , checkpoint_from=COALESCE( #{checkpointFrom} , '' ), checkpoint_rows= #{checkpointRows},
+        progress_json=CASE WHEN #{progressJson} IS NULL THEN progress_json
+                          ELSE JSON_MERGE_PATCH(COALESCE(progress_json, '{}'), #{progressJson}) END
+        WHERE id= #{id} AND status= 'running'
+    </update>
+
+    <!--
+      与 finish 同一条 UPDATE:收尾运行,保留已结束记录。
+      ⚠️ 如实说明:本条 SQL 与上面的 finish 逐字相同(同样带 status='running' 守卫),并不是语义不同的第二条语句。
+         它的存在只为让 MetadataRepository.finishSyncRun 在 finish 抛异常时能原样重试一次
+         (避免瞬时写库失败把记录留在 running),方法名表达的是调用意图,SQL 上两者等价。
+    -->
+    <update id="finishIfRunning">
+        UPDATE sync_runs
+        SET status= #{status} , finished_at=datetime( 'now' ), rows_read=GREATEST(rows_read, #{rowsRead}), rows_written=GREATEST(rows_written, #{rowsWritten}),
+        error=COALESCE( #{error} , '' ), note=COALESCE( #{note} , '' ),
+        resumed= #{resumed} , checkpoint_from=COALESCE( #{checkpointFrom} , '' ), checkpoint_rows= #{checkpointRows},
+        progress_json=CASE WHEN #{progressJson} IS NULL THEN progress_json
+                          ELSE JSON_MERGE_PATCH(COALESCE(progress_json, '{}'), #{progressJson}) END
+        WHERE id= #{id} AND status= 'running'
+    </update>
+
+    <!--
+      某任务最近 limit 条运行历史。参数 taskId / limit;返回 List<SyncRun>,按 id 倒序(最新在前)。
+      无副作用。limit 的规整(<=0 或 >100 回退 20)在门面 MetadataRepository.listSyncRuns 里做,本语句不做。
+    -->
+    <select id="listByTask" resultType="com.el2ck.entity.sync.SyncRun">
+        SELECT id, task_id, status, started_at, finished_at, rows_read, rows_written, error, note,
+        resumed, checkpoint_from, checkpoint_rows, progress_json
+        FROM sync_runs
+        WHERE task_id = #{taskId}
+          AND deleted_at IS NULL
+        ORDER BY id DESC
+        LIMIT #{limit}
+    </select>
+
+    <!--
+      执行日志分页查询的公共过滤条件。task_id 必带;其余条件传空即不过滤。
+      keyword 同时匹配运行号/说明/错误/断点起始键,便于在前端执行日志页直接搜。
+    -->
+    <sql id="RunLogFilter">
+        WHERE task_id = #{taskId}
+          AND deleted_at IS NULL
+        <if test="status != null and status != ''">
+            AND status = #{status}
+        </if>
+        <if test="resumed != null">
+            AND resumed = #{resumed}
+        </if>
+        <if test="days > 0">
+            AND started_at &gt;= DATE_SUB(UTC_TIMESTAMP(), INTERVAL #{days} DAY)
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND (CAST(id AS CHAR) LIKE CONCAT('%', #{keyword}, '%')
+                OR note LIKE CONCAT('%', #{keyword}, '%')
+                OR error LIKE CONCAT('%', #{keyword}, '%')
+                OR checkpoint_from LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+    </sql>
+
+    <!-- 执行日志分页结果:与 countPage 使用同一组过滤条件,id 倒序。 -->
+    <select id="queryPage" resultType="com.el2ck.entity.sync.SyncRun">
+        SELECT id, task_id, status, started_at, finished_at, rows_read, rows_written, error, note,
+        resumed, checkpoint_from, checkpoint_rows, progress_json
+        FROM sync_runs
+        <include refid="RunLogFilter"/>
+        ORDER BY id DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <!-- 执行日志分页总数:与 queryPage 条件完全一致。 -->
+    <select id="countPage" resultType="java.lang.Long">
+        SELECT count(*)
+        FROM sync_runs
+        <include refid="RunLogFilter"/>
+    </select>
+
+    <!--
+      按任务和运行号查单条运行记录。参数 taskId / runId;返回 SyncRun,不存在返回 null。
+      不受最近历史条数限制。无副作用。
+    -->
+    <select id="getByTaskAndId" resultType="com.el2ck.entity.sync.SyncRun">
+        SELECT id, task_id, status, started_at, finished_at, rows_read, rows_written, error, note,
+        resumed, checkpoint_from, checkpoint_rows, progress_json, deleted_at
+        FROM sync_runs
+        WHERE task_id= #{taskId} AND id= #{runId}
+    </select>
+
+    <!--
+      一次查出每个任务各自最新一条运行记录(任务列表页用,避免逐条任务再查一次历史)。
+      参数无;返回 List<SyncRun>。无副作用。
+      子查询按 task_id 取 MAX(id) 定位最新一条(id 自增,最大 id 即最近一次),再 JOIN 回原表取整行。
+      ⚠️ 用 INNER JOIN:从未运行过的任务不会出现在结果里,调用方需按 task_id 缺失自行处理。
+    -->
+    <select id="listLatest" resultType="com.el2ck.entity.sync.SyncRun">
+        SELECT r.id, r.task_id, r.status, r.started_at, r.finished_at, r.rows_read, r.rows_written,
+        r.error, r.note, r.resumed, r.checkpoint_from, r.checkpoint_rows, r.progress_json
+        FROM sync_runs r
+        JOIN (SELECT task_id, MAX(id) AS id
+        FROM sync_runs
+        GROUP BY task_id) latest
+        ON r.id = latest.id
+    </select>
+
+    <!-- 由当前用户的任务驱动最近运行定位，利用 (task_id,id) 索引，避免先聚合全库历史。 -->
+    <select id="listLatestOwned" resultType="com.el2ck.entity.sync.SyncRun">
+        SELECT r.id, r.task_id, r.status, r.started_at, r.finished_at, r.rows_read, r.rows_written,
+               r.error, r.note, r.resumed, r.checkpoint_from, r.checkpoint_rows, r.progress_json
+        FROM el_resource_owners o
+        JOIN sync_tasks t ON t.id=o.resource_id
+        JOIN sync_runs r ON r.id=(SELECT h.id FROM sync_runs h WHERE h.task_id=t.id
+                                 ORDER BY (h.status='running') DESC, h.id DESC LIMIT 1)
+        WHERE o.resource_type='sync-task' AND o.owner_user_id=#{ownerId}
+        <if test="taskIds != null">
+            <choose>
+                <when test="taskIds.size() > 0">
+                    AND t.id IN <foreach collection="taskIds" item="taskId" open="(" separator="," close=")">#{taskId}</foreach>
+                </when>
+                <otherwise>AND 1=0</otherwise>
+            </choose>
+        </if>
+    </select>
+
+    <!--
+      某任务当前是否有正在运行的记录(并发防重入)。参数 taskId;返回计数(java.lang.Long)。
+      无副作用。此查询用于状态展示/业务检查；并发互斥还必须持有 SyncExecutionGuard 会话锁。
+    -->
+    <select id="countRunning" resultType="java.lang.Long">
+        SELECT count(*)
+        FROM sync_runs
+        WHERE task_id = #{taskId} AND status = 'running'
+    </select>
+
+    <!--
+      删除某任务的全部运行历史。参数 taskId;返回受影响行数。副作用:删除。
+      由 MetadataRepository.deleteSyncTask 在删除任务主记录之后调用;本 Mapper 自身不做级联,
+      单独调本方法不会删任务,只清该任务的运行记录。
+    -->
+    <!-- running/latest 查询保留物理记录，逻辑删除日志不能使任务状态倒退或影响运行恢复。 -->
+    <select id="lockRunLog" resultType="com.el2ck.entity.sync.SyncRun" flushCache="true" useCache="false">
+        SELECT id, task_id, status, deleted_at FROM sync_runs
+        WHERE task_id=#{taskId} AND id=#{runId} FOR UPDATE
+    </select>
+
+    <update id="softDeleteRunLog">
+        UPDATE sync_runs SET deleted_at=UTC_TIMESTAMP()
+        WHERE task_id=#{taskId} AND id=#{runId} AND deleted_at IS NULL AND status IN ('success','failed')
+    </update>
+
+    <delete id="deleteByTask">
+        DELETE
+        FROM sync_runs
+        WHERE task_id = #{taskId}
+    </delete>
+</mapper>

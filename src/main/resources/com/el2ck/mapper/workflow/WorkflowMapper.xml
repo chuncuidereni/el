@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 【文件职责】维护 SQL 工作流定义及步骤配置的 MyBatis SQL 映射。
+     修改语句时需同步检查参数名、结果映射、列名、排序和事务语义；SQL 内容本身不应由注释改动。 -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  工作流定义表(el_wf_tasks)的 MyBatis 映射。namespace 对应 com.el2ck.mapper.workflow.WorkflowMapper,
+  语句 id 与接口方法同名(一一对应):list / getById / insert / update / deleteById。
+  DAG 的节点与连线以 nodes_json / edges_json 两列 TEXT 存储,与 WfTask 实体字段一一对应。
+
+  ⚠️ 本文件的 SQL 有两条不能按字面理解的方言约定(由 repository/metadata/MetadataSqlDialect.mysql()
+     在驱动边界统一改写,编辑时必须遵守,否则运行期会报表不存在或语法错误):
+       1) 表名写「逻辑名」:这里写 wf_tasks,实际执行时被改写为 el_wf_tasks。
+          不要在 SQL 里自己写 el_ 前缀,也不要新增未在 MetadataSqlDialect.TABLES 登记的表;
+       2) 时间函数沿用旧写法 datetime('now'),执行前会被改写为 UTC_TIMESTAMP()
+          (库内时间统一按 UTC 存取,与连接的 time_zone 设置一致)。
+-->
+<mapper namespace="com.el2ck.mapper.workflow.WorkflowMapper">
+
+    <select id="listReferences" resultType="com.el2ck.entity.workflow.WfTask" flushCache="true" useCache="false">
+        SELECT id, nodes_json FROM wf_tasks ORDER BY id
+    </select>
+
+    <!--
+      全部工作流定义。参数无;返回 List<WfTask>,按 id 倒序(最新创建在前,前端列表页默认顺序)。无副作用。
+    -->
+    <select id="list" resultType="com.el2ck.entity.workflow.WfTask">
+        SELECT id, name, description, nodes_json, edges_json, enabled, created_at, updated_at
+        FROM wf_tasks
+        ORDER BY id DESC
+    </select>
+
+    <!--
+      按主键取单个工作流。参数 id;返回 WfTask,不存在返回 null(调用方自行判定 404)。无副作用。
+      注:列名 nodes_json / edges_json 与实体属性 nodesJson / edgesJson 通过驼峰自动映射对应,无需 AS 别名。
+    -->
+    <select id="getById" resultType="com.el2ck.entity.workflow.WfTask">
+        SELECT id, name, description, nodes_json, edges_json, enabled, created_at, updated_at
+        FROM wf_tasks
+        WHERE id = #{id}
+    </select>
+
+    <!--
+      新增工作流。参数 WfTask w;返回受影响行数。nodes_json / edges_json 写入 JSON 文本。
+      useGeneratedKeys + keyProperty 把自增主键回填到 w.id,调用方 insert 后可直接取 id。
+      created_at / updated_at 由列默认值填充,不在此写入。副作用:插入一行。
+    -->
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO wf_tasks (name, description, nodes_json, edges_json, enabled)
+        VALUES ( #{name} , #{description} , #{nodesJson} , #{edgesJson} , #{enabled} )
+    </insert>
+
+    <!--
+      更新工作流定义。参数 WfTask w;返回受影响行数(0 表示不存在)。副作用:更新。
+      updated_at 由库侧置为当前 UTC 时间(datetime('now') 经方言改写),避免依赖应用机器时钟;
+      created_at 不在此更新(它是创建时间,不随编辑变化)。
+      ⚠️ 表 wf_tasks 另有 cron_expr / group_id 两列,但 WfTask 实体没有这两个字段、本语句也不写它们 ——
+         经本 Mapper 的新增与更新都不会触碰这两列,它们始终是列默认值('' / 0)。
+    -->
+    <update id="update">
+        UPDATE wf_tasks
+        SET name= #{name} , description= #{description} , nodes_json= #{nodesJson} , edges_json= #{edgesJson} ,
+        enabled= #{enabled} , updated_at=datetime( 'now' )
+        WHERE id= #{id}
+    </update>
+
+    <!--
+      删除工作流定义。参数 id;返回受影响行数(0 表示不存在)。副作用:删除一行。
+      ⚠️ 级联清理不在本语句里,而由 repository 层 MetadataRepository.deleteWorkflow 完成:先调
+         WfRunMapper.deleteLogsByWorkflow 删节点日志,再 deleteByWorkflow 删运行记录,最后才调本方法删定义。
+         也就是说单独调用这个 Mapper 方法会留下该工作流的运行记录与节点日志(表间无外键,不会被自动清理),
+         删除工作流请走 repository。
+    -->
+    <delete id="deleteById">
+        DELETE
+        FROM wf_tasks
+        WHERE id = #{id}
+    </delete>
+</mapper>

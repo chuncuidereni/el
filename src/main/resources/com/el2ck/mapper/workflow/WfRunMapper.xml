@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 【文件职责】维护 SQL 工作流运行记录和步骤结果的 MyBatis SQL 映射。
+     修改语句时需同步检查参数名、结果映射、列名、排序和事务语义；SQL 内容本身不应由注释改动。 -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  工作流运行记录(el_wf_runs)与节点日志(el_wf_run_logs)的 MyBatis 映射。namespace 对应
+  com.el2ck.mapper.workflow.WfRunMapper,语句 id 与接口方法同名(一一对应):
+  insert / finish / listByWorkflow / latestByWorkflow / countRunning 操作 wf_runs,
+  insertLog / finishLog / listLogs / deleteLogsByWorkflow 操作 wf_run_logs,deleteByWorkflow 操作 wf_runs。
+
+  ⚠️ 本文件的 SQL 有两条不能按字面理解的方言约定(由 repository/metadata/MetadataSqlDialect.mysql()
+     在驱动边界统一改写,编辑时必须遵守,否则运行期会报表不存在或语法错误):
+       1) 表名写「逻辑名」:这里写 wf_runs / wf_run_logs,实际执行时被改写为 el_wf_runs / el_wf_run_logs。
+          不要在 SQL 里自己写 el_ 前缀,也不要新增未在 MetadataSqlDialect.TABLES 登记的表;
+       2) 时间函数沿用旧写法 datetime('now'),执行前会被改写为 UTC_TIMESTAMP()
+          (库内时间统一按 UTC 存取,与连接的 time_zone 设置一致)。
+
+  ⚠️ 并发语义(本表与 sync_runs 不同,这里是真正的数据库强约束):
+     wf_runs 有一个生成列 running_owner_id = CASE WHEN status='running' THEN workflow_id ELSE NULL END,
+     其上有唯一索引 el_idx_wf_runs_one_running。也就是说「同一工作流同时只能有一条 running」由数据库保证;
+     一旦某行 status 不再是 running,该生成列变为 NULL,槽位释放。
+-->
+<mapper namespace="com.el2ck.mapper.workflow.WfRunMapper">
+
+    <!--
+      创建一条运行记录。参数 WfRun r(只用到 workflowId);返回受影响行数。
+      状态固定写 'running',started_at 由列默认值 CURRENT_TIMESTAMP 填充。useGeneratedKeys + keyProperty
+      把自增主键回填到 r.id,调用方可直接取 runId 供轮询。副作用:插入一行。
+      ⚠️ 本插入会占用上文说的唯一索引槽位:若该工作流已有 running 记录,这里会抛唯一键冲突(异常),
+         而不是静默新增。业务侧 WorkflowService 在同一临界区内先 countRunning 判重再调本语句以给出友好提示,
+         请不要绕过它直接连插。
+    -->
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO wf_runs (workflow_id, status)
+        VALUES ( #{workflowId} , 'running' )
+    </insert>
+
+    <!--
+      结束一次运行:写 status / finished_at / error。参数 WfRun r(用到 id/status/error);返回受影响行数。
+      error 用 COALESCE 归一为空串 —— error 列 NOT NULL,写 null 会失败。副作用:更新。
+      两点反直觉:
+        - WHERE 只有 id,不带 status='running' 守卫,故重复调用会直接覆盖,不是「只收尾一次」;
+        - 更新后 status 不再等于 running,生成列 running_owner_id 归 NULL,释放唯一索引槽位(下一次运行才能插入)。
+    -->
+    <update id="finish">
+        UPDATE wf_runs
+        SET status= #{status} , finished_at=datetime( 'now' ), error=COALESCE( #{error} , '' )
+        WHERE id= #{id}
+    </update>
+
+    <!--
+      某工作流最近 limit 条运行记录。参数 workflowId / limit;返回 List<WfRun>,按 id 倒序(最新在前)。
+      无副作用。limit 的规整(<=0 或 >100 回退 20)在门面 MetadataRepository.listWfRuns 里做。
+    -->
+    <select id="listByWorkflow" resultType="com.el2ck.entity.workflow.WfRun">
+        SELECT id, workflow_id, status, started_at, finished_at, error
+        FROM wf_runs
+        WHERE workflow_id = #{workflowId}
+        ORDER BY id DESC
+        LIMIT #{limit}
+    </select>
+
+    <!--
+      某工作流最近一次运行(列表页摘要用)。参数 workflowId;返回 WfRun,从未运行时返回 null。无副作用。
+    -->
+    <select id="latestByWorkflow" resultType="com.el2ck.entity.workflow.WfRun">
+        SELECT id, workflow_id, status, started_at, finished_at, error
+        FROM wf_runs
+        WHERE workflow_id = #{workflowId}
+        ORDER BY id DESC
+        LIMIT 1
+    </select>
+
+    <!--
+      某工作流当前是否有正在运行的记录(并发防重入)。参数 workflowId;返回计数(java.lang.Long)。
+      无副作用。与唯一索引双保险:这里用于给出友好提示,唯一索引用于真正兜底。
+    -->
+    <select id="countRunning" resultType="java.lang.Long">
+        SELECT count(*)
+        FROM wf_runs
+        WHERE workflow_id = #{workflowId} AND status = 'running'
+    </select>
+
+    <!--
+      创建一条节点日志。参数 WfRunLog l(用到 runId/nodeId/nodeType);返回受影响行数。
+      状态固定写 'running',rows_in/rows_out/duration_ms/error 交给列默认值;主键回填到 l.id。
+      副作用:插入一行。节点日志无并发唯一约束,同一次运行可落多条(每个节点一条)。
+    -->
+    <insert id="insertLog" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO wf_run_logs (run_id, node_id, node_type, status)
+        VALUES ( #{runId} , #{nodeId} , #{nodeType} , 'running' )
+    </insert>
+
+    <!--
+      结束一条节点日志:写 status / rows_in / rows_out / duration_ms / error。
+      参数 WfRunLog l(用到 id/status/rowsIn/rowsOut/durationMs/error);返回受影响行数。副作用:更新。
+      数值列用 COALESCE 归一为 0、error 归一为空串(这些列均 NOT NULL,写 null 会失败)。
+      WHERE 只有 id:无 running 守卫、也无唯一约束,重复收尾会直接覆盖。
+    -->
+    <update id="finishLog">
+        UPDATE wf_run_logs
+        SET status= #{status} , rows_in=COALESCE( #{rowsIn} ,0), rows_out=COALESCE( #{rowsOut} ,0),
+        duration_ms=COALESCE( #{durationMs} ,0), error=COALESCE( #{error} , '' )
+        WHERE id= #{id}
+    </update>
+
+    <!--
+      某次运行的全部节点日志。参数 runId;返回 List<WfRunLog>,按 id 升序(即节点实际执行顺序)。无副作用。
+    -->
+    <select id="listLogs" resultType="com.el2ck.entity.workflow.WfRunLog">
+        SELECT id, run_id, node_id, node_type, status, rows_in, rows_out, duration_ms, error
+        FROM wf_run_logs
+        WHERE run_id = #{runId}
+        ORDER BY id ASC
+    </select>
+
+    <!--
+      删除某工作流下全部运行所对应的节点日志。参数 workflowId;返回受影响行数。副作用:删除。
+      通过子查询圈定该工作流的各 run_id,再按 run_id 删日志。
+      ⚠️ 子查询依赖 wf_runs 尚存在:必须在 deleteByWorkflow 之前调用,否则 wf_runs 已删空、子查询无结果,
+         日志将删不掉而成为孤儿。顺序由 MetadataRepository.deleteWorkflow 保证(先子表后主表)。
+    -->
+    <delete id="deleteLogsByWorkflow">
+        DELETE
+        FROM wf_run_logs
+        WHERE run_id IN (SELECT id
+        FROM wf_runs
+        WHERE workflow_id = #{workflowId} )
+    </delete>
+
+    <!--
+      删除某工作流的全部运行记录。参数 workflowId;返回受影响行数。副作用:删除(可能多行)。
+      ⚠️ 表间无外键,级联不在本语句内:必须由 MetadataRepository.deleteWorkflow 先调 deleteLogsByWorkflow
+         再调本语句。单独调本方法只会删掉运行记录,留下按 run_id 的孤儿日志。
+    -->
+    <delete id="deleteByWorkflow">
+        DELETE
+        FROM wf_runs
+        WHERE workflow_id = #{workflowId}
+    </delete>
+</mapper>

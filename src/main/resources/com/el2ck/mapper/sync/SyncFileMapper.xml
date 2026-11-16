@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 【文件职责】维护同步文件元数据的 MyBatis SQL 映射。
+     修改语句时需同步检查参数名、结果映射、列名、排序和事务语义；SQL 内容本身不应由注释改动。 -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  同步文件去重表(el_sync_files)的 MyBatis 映射。namespace 对应 com.el2ck.mapper.sync.SyncFileMapper,
+  语句 id 与接口方法同名(一一对应):listByTask / upsert / clearByTask。
+
+  ⚠️ 本文件的 SQL 有两条不能按字面理解的方言约定(由 repository/metadata/MetadataSqlDialect.mysql()
+     在驱动边界统一改写,编辑时必须遵守,否则运行期会报表不存在或语法错误):
+       1) 表名写「逻辑名」:这里写 sync_files,实际执行时被改写为 el_sync_files。
+          不要在 SQL 里自己写 el_ 前缀,也不要新增未在 MetadataSqlDialect.TABLES 登记的表;
+       2) 时间函数沿用旧写法 datetime('now'),执行前会被改写为 UTC_TIMESTAMP()
+          (库内时间统一按 UTC 存取,与连接的 time_zone 设置一致)。
+  另外本文件的 ON CONFLICT(...) DO UPDATE / excluded.x 也会被改写成 MySQL 的
+  ON DUPLICATE KEY UPDATE / VALUES(x),详见 upsert 的注释。
+-->
+<mapper namespace="com.el2ck.mapper.sync.SyncFileMapper">
+
+    <!--
+      查某任务已同步的全部文件记录。参数 taskId;返回 List<SyncFile>(无记录时为空)。
+      调用方(MetadataRepository.listSyncedFiles)拿到后在内存里按 remotePath 归键,
+      用于逐文件比对 size/mtime,判定该文件是「新出现 / 未变化跳过 / 已变化」。无副作用。
+    -->
+    <select id="listByTask" resultType="com.el2ck.entity.sync.SyncFile">
+        SELECT id, task_id, remote_path, size, mtime
+        FROM sync_files
+        WHERE task_id = #{taskId}
+    </select>
+
+    <!--
+      记录/更新一个已同步文件(按唯一约束 upsert)。参数 taskId/remotePath/size/mtime;
+      返回受影响行数,无查询结果。副作用:写库 —— 插入一行,或刷新已有行的 size/mtime/synced_at。
+      ⚠️ 这里写的冲突键 (task_id, remote_path) 与库中真正的唯一索引并不是一回事:表对完整路径
+         建的是 SHA-256 生成列 remote_path_hash = UNHEX(SHA2(remote_path,256)),唯一索引实际在
+         (task_id, remote_path_hash) 上 —— 因为 remote_path 是 LONGTEXT,长路径直接建索引会超索引长度上限。
+         SQLite 语法要求写冲突目标,而 MySQL 的 ON DUPLICATE KEY UPDATE 不看目标、直接命中任意唯一键,
+         所以经方言改写后本条仍能工作;但别误以为冲突是按 remote_path 文本匹配的。
+      synced_at 用旧写法 datetime('now')(执行前改写为 UTC_TIMESTAMP()),时间取库侧而非应用机器。
+    -->
+    <insert id="upsert">
+        INSERT INTO sync_files (task_id, remote_path, size, mtime, synced_at)
+        VALUES ( #{taskId} , #{remotePath} , #{size} , #{mtime} , datetime( 'now' ))
+        ON CONFLICT(task_id, remote_path) DO UPDATE
+        SET size = excluded.size, mtime = excluded.mtime, synced_at = excluded.synced_at
+    </insert>
+
+    <!--
+      清空某任务的全部去重记录。参数 taskId;返回受影响行数。副作用:删除。
+      只在「强制重建」路径使用(SyncEngine 在 force 分支调用 store.clearSyncedFiles),普通同步不清。
+      ⚠️ 删除同步任务不会连带清理本表:sync_files 的清理仅由上面这条强制重建路径触发,
+         任务删除后本表会留下按 task_id 的残留行(参见 SyncTaskMapper.deleteById 的说明)。
+    -->
+    <delete id="clearByTask">
+        DELETE
+        FROM sync_files
+        WHERE task_id = #{taskId}
+    </delete>
+</mapper>

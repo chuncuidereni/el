@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 【文件职责】维护系统设置键值的 MyBatis SQL 映射。
+     修改语句时需同步检查参数名、结果映射、列名、排序和事务语义；SQL 内容本身不应由注释改动。 -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  全局默认高级配置表(el_app_settings)的 MyBatis 映射。namespace 对应
+  com.el2ck.mapper.system.AppSettingsMapper,每个语句的 id 对应该接口的方法名:
+  metadataSizeBytes / listAll / upsert。
+
+  ⚠️ 本文件里的 SQL 有两条不能按字面理解的约定(由 repository/metadata/MetadataSqlDialect.mysql()
+     在驱动边界统一改写,编辑本文件时必须遵守,否则会在运行期报表不存在或语法错误):
+       1) 表名写「逻辑名」:这里写 app_settings,实际执行时被改写为 el_app_settings。
+          不要在 SQL 里自己写 el_ 前缀,也不要新增未在 MetadataSqlDialect.TABLES 登记的表;
+       2) 时间函数沿用一个旧写法 datetime('now'),执行前会被改写为 UTC_TIMESTAMP()
+          (库内时间统一按 UTC 存取,见 MysqlMetadataDataSource 的 time_zone 设置)。
+          (本文件当前没有用到时间函数的语句,但约定对新增语句同样成立。)
+
+  本表是简单 key/value 表;键的默认值语义(缺失回填内置默认)由 MetadataRepository#getAppSettings
+  在 Java 层处理,本文件只负责存取原始字符串。
+-->
+<mapper namespace="com.el2ck.mapper.system.AppSettingsMapper">
+
+    <!--
+      统计平台自己的表在 MySQL 上占用的 data_length + index_length 之和,供系统统计页展示。
+      ⚠️ 这是全文件唯一一条**不写逻辑表名**的语句,而且这里的 el_ 是刻意写死、正确的:
+      它查的是 MySQL 系统库 information_schema(不在 MetadataSqlDialect.TABLES 里,不会被加前缀),
+      再按 LEFT(table_name,3)='el_' 过滤出 el_ 前缀的物理表 —— 也就是方言改写后的实际表名。
+      换句话说它统计的正是「经过 el_ 改写之后」的那批表,不要把它「统一」成逻辑名或去掉 el_。
+      DATABASE() 也不会被方言加反引号(对 `database(` 这种函数调用有特判),可放心使用。
+      COALESCE(..., 0) 兜住一个边界:库里一张 el_ 表都没有时 SUM 返回 NULL,而非 0。
+      无参数、无副作用;只读元数据,不锁表;返回近似值(InnoDB 统计信息),调用方
+      SystemStatsService.metadataSize 已用 try/catch 把它降级为 0。
+    -->
+    <select id="metadataSizeBytes" resultType="java.lang.Long">
+        SELECT COALESCE(SUM(data_length + index_length),0)
+        FROM information_schema.tables
+        WHERE table_schema=DATABASE() AND LEFT(table_name,3)= 'el_'
+    </select>
+
+    <!--
+      读出全表键值对,供 MetadataRepository#getAppSettings 逐行归位到 AppSettings 实体
+      (不认识的键忽略,因此本表可以比代码内置的键多)。
+      resultType 是 Map,列名即 Map 的 key,调用方按 "key" / "value" 取值。
+      无 ORDER BY:结果顺序不保证,调用方也不要依赖顺序 —— 归位是按 key 匹配做的。
+    -->
+    <select id="listAll" resultType="java.util.Map">
+        SELECT key, value
+        FROM app_settings
+    </select>
+
+    <!--
+      写入或覆盖一个配置键(侧作用:键已存在时旧值被直接丢弃,不留历史)。
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value 是 SQLite 写法,执行前被方言改写为
+      MySQL 的 ON DUPLICATE KEY UPDATE value = VALUES(value);冲突判定依据是 key 列的主键约束
+      (el_app_settings 的表级 PRIMARY KEY(key)),excluded.value 亦由方言改写,不要手写成 VALUES()。
+      ⚠️ key 是 MySQL 保留字,方言会自动加反引号,不要在 XML 里自己加。
+      入参即待写入的键与值;无返回(调用方 setAppSettings 对 5 个内置键逐个调用)。
+    -->
+    <insert id="upsert">
+        INSERT INTO app_settings (key, value)
+        VALUES ( #{key} , #{value} )
+        ON CONFLICT(key) DO UPDATE
+        SET value = excluded.value
+    </insert>
+</mapper>

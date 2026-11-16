@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 【文件职责】维护数据源元数据及归属字段的 MyBatis SQL 映射。
+     修改语句时需同步检查参数名、结果映射、列名、排序和事务语义；SQL 内容本身不应由注释改动。 -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  数据源(同步输入端)表(el_data_sources)的 MyBatis 映射。namespace 对应
+  com.el2ck.mapper.datasource.DataSourceMapper,每个语句的 id 对应该接口的方法名:
+  list / getById / getByCode / countGroup / insert / update / deleteById。
+
+  ⚠️ 本文件里的 SQL 有两条不能按字面理解的约定(由 repository/metadata/MetadataSqlDialect.mysql()
+     在驱动边界统一改写,编辑本文件时必须遵守,否则会在运行期报表不存在或语法错误):
+       1) 表名写「逻辑名」:这里写 data_sources,实际执行时被改写为 el_data_sources。
+          不要在 SQL 里自己写 el_ 前缀,也不要新增未在 MetadataSqlDialect.TABLES 登记的表;
+       2) 时间函数沿用一个旧写法 datetime('now'),执行前会被改写为 UTC_TIMESTAMP()
+          (库内时间统一按 UTC 存取,见 MysqlMetadataDataSource 的 time_zone 设置)。
+
+  列名映射:所有列名都能被 map-underscore-to-camel-case 自动映射到实体 DataSource
+  (config_enc→configEnc、group_id→groupId …),故本文件不需要 AS 别名。
+-->
+<mapper namespace="com.el2ck.mapper.datasource.DataSourceMapper">
+
+    <!-- 源引用保存和源删除共用此锁；锁定读不复用事务的旧 MVCC 快照或 MyBatis 本地缓存。
+         el_resource_owners 属于新权限表，沿用权限模块的物理表名；方言只转换登记的旧逻辑名。 -->
+    <select id="lockOwnedById" resultType="java.lang.Long" flushCache="true" useCache="false">
+        SELECT d.id FROM data_sources d
+        JOIN el_resource_owners o ON o.resource_type='datasource' AND o.resource_id=d.id
+        WHERE d.id=#{id} AND o.owner_user_id=#{ownerId}
+        FOR UPDATE
+    </select>
+
+    <!--
+      公共列清单:list / getById / getByCode 三个 SELECT 共用的字段集,避免重复维护列名。
+      config_enc 承载的是整段加密后的类型配置(含密码),随 SELECT 读出到实体;
+      解密与敏感字段脱敏由服务层负责,不要在这里做列裁剪。
+    -->
+    <sql id="BaseColumns">
+        id, code, name, type, config_enc, description, group_id, created_at, updated_at
+    </sql>
+
+    <!-- 全部数据源,按自增主键倒序 —— 最新创建的排在最前(前端列表默认顺序)。 -->
+    <select id="list" resultType="com.el2ck.entity.datasource.DataSource">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM data_sources
+        ORDER BY id DESC
+    </select>
+
+    <!-- 按主键取单个数据源;查不到返回 null(调用方自行判定 404)。 -->
+    <select id="getById" resultType="com.el2ck.entity.datasource.DataSource">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM data_sources
+        WHERE id = #{id}
+    </select>
+
+    <!-- 按业务编码 code 取单个数据源;code 列有 UNIQUE 约束,用于新增/改名前的查重,
+         最多命中一行,查不到返回 null。 -->
+    <select id="getByCode" resultType="com.el2ck.entity.datasource.DataSource">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM data_sources
+        WHERE code = #{code}
+    </select>
+
+    <!--
+      ⚠️ 别被方法名误导:这里查的是分组表 ds_groups,不是 data_sources ——
+      用途是在写入 data_sources.group_id 之前校验目标分组确实存在
+      (MetadataRepository.dataSourceGroupExists 判 count > 0)。
+      之所以要显式查,是因为表结构没有外键:group_id 可以写入任意数字(含不存在的分组 id
+      和不存在的 0),数据库不会拦,存在性只能由本语句在应用层保证。
+      入参 id 是「分组 id」而非数据源 id;无副作用。
+    -->
+    <select id="countGroup" resultType="java.lang.Integer">
+        SELECT count(*)
+        FROM ds_groups
+        WHERE id = #{id}
+    </select>
+
+    <!--
+      新增数据源。useGeneratedKeys + keyProperty 把自增主键回填到入参 DataSource.id 上,
+      MetadataRepository.createDataSource 依赖回填后的 id 直接返回。
+      config_enc 由服务层加密后传入(本层不碰明文);group_id 的存在性须由调用方先经
+      countGroup/ dataSourceGroupExists 校验。
+      created_at / updated_at 不在本语句里,由建表默认 CURRENT_TIMESTAMP 补齐。
+      ⚠️ description 列是 NOT NULL:实体里该字段为 null 时 JDBC 会写入 NULL 而直接报错,
+      不会自动落成列默认 ''(列默认只在「不提供该列」时生效),调用方需先归一为空串。
+    -->
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO data_sources (code, name, type, config_enc, description, group_id)
+        VALUES ( #{code} , #{name} , #{type} , #{configEnc} , #{description} , #{groupId} )
+    </insert>
+
+    <!--
+      整体覆盖一个数据源的可编辑字段。code 也参与更新,而它有 UNIQUE 约束 ——
+      改成已被占用的编码会直接抛唯一键冲突,调用方(DataSourceService)需先查重。
+      created_at 不更新;updated_at 用库侧 datetime('now'),不依赖应用机器时钟。
+      config_enc 同 insert,是加密后的整段配置。
+    -->
+    <update id="update">
+        UPDATE data_sources
+        SET code= #{code} , name= #{name} , type= #{type} , config_enc= #{configEnc} , description= #{description} ,
+        group_id= #{groupId} , updated_at=datetime( 'now' )
+        WHERE id= #{id}
+    </update>
+
+    <!--
+      删除数据源行。⚠️ 无级联,保护在 repository 层:MetadataRepository.deleteDataSource 会先在
+      Java 层扫描同步任务与工作流 JSON 里的 dataSourceId 引用,存在引用则直接拒绝删除;
+      本语句自身不做任何检查,也没有外键。
+      所以单独调用本 Mapper 方法会绕过引用保护,留下仍指向已删数据源的同步任务行;
+      另外分组关系(ds_groups 的行)是独立表,不受影响,也不因删数据源而清理。
+    -->
+    <delete id="deleteById">
+        DELETE
+        FROM data_sources
+        WHERE id = #{id}
+    </delete>
+</mapper>

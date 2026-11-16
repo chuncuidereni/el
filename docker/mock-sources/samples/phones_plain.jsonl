@@ -1,0 +1,5 @@
+{"event_id":1,"user_id":101,"event":"page_view","page":"home","phone":"13800000001"}
+{"event_id":2,"user_id":102,"event":"page_view","page":"products","phone":"13800000002"}
+{"event_id":3,"user_id":101,"event":"add_to_cart","page":"products","phone":"13800000001"}
+{"event_id":4,"user_id":103,"event":"page_view","page":"home","phone":"13800000003"}
+{"event_id":5,"user_id":101,"event":"purchase","page":"checkout","phone":"13800000001"}

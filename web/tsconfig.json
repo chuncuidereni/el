@@ -1,0 +1,42 @@
+// 应用源码的 TypeScript 配置(JSONC,允许注释)。
+// 仅做类型检查(noEmit),实际转译由 Vite/esbuild 完成。
+{
+  "compilerOptions": {
+    // 目标语法 ES2020,现代浏览器均可直接运行
+    "target": "ES2020",
+    // 类字段按标准语义(define)而非旧式赋值,避免与 ES2020 目标不一致
+    "useDefineForClassFields": true,
+    // 保留 ESM 语法交给打包器处理,不做 CommonJS 转换
+    "module": "ESNext",
+    // 按打包器规则解析模块(支持 exports 字段、无扩展名导入等)
+    "moduleResolution": "bundler",
+    // 可用的内置类型:ES2020 标准库 + 浏览器 DOM
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    // 开启严格模式(严格空值检查等),尽早暴露潜在空引用
+    "strict": true,
+    // 保留 JSX,由 Vue 的编译流程处理
+    "jsx": "preserve",
+    // 允许 import JSON(如按需引入配置/数据)
+    "resolveJsonModule": true,
+    // 每个文件独立转译,配合打包器更快;要求类型导入用 import type
+    "isolatedModules": true,
+    // 允许默认导入 CommonJS 模块
+    "esModuleInterop": true,
+    // 跳过第三方 .d.ts 检查,避免依赖库类型问题阻塞构建
+    "skipLibCheck": true,
+    // 只做类型检查不产出文件(Vite 负责产物)
+    "noEmit": true,
+    // 路径映射的基准目录
+    "baseUrl": ".",
+    "paths": {
+      // 与 vite.config.ts 的 alias 保持一致:@/xxx → src/xxx
+      "@/*": ["src/*"]
+    },
+    // 注入 Vite 客户端类型(import.meta.env、静态资源导入声明等)
+    "types": ["vite/client"]
+  },
+  // 纳入检查的文件:src 下的 ts / 类型声明 / vue 单文件组件
+  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.vue"],
+  // 项目引用:构建工具脚本(vite.config.ts)使用独立的 node 环境配置
+  "references": [{ "path": "./tsconfig.node.json" }]
+}

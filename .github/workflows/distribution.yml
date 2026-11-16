@@ -1,0 +1,116 @@
+name: Cross-platform one-click packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: distribution-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  images:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-22.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build credential-free application and database payload
+        env:
+          EL_VERSION: release-${{ github.run_number }}-${{ github.sha }}
+        run: python distribution/build_images.py --arch '${{ matrix.arch }}' --version "$EL_VERSION" --output 'release/payload-${{ matrix.arch }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: payload-${{ matrix.arch }}
+          path: release/payload-${{ matrix.arch }}/
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+
+  packages:
+    needs: images
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: windows, arch: amd64, runner: windows-2022}
+          - {os: linux, arch: amd64, runner: ubuntu-22.04}
+          - {os: linux, arch: arm64, runner: ubuntu-24.04-arm}
+          - {os: macos, arch: amd64, runner: macos-15-intel}
+          - {os: macos, arch: arm64, runner: macos-15}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: payload-${{ matrix.arch }}
+          path: release/payload
+      - run: python -m pip install -r distribution/requirements-build.txt
+      - run: python distribution/package.py --payload release/payload --output release/public
+      - name: Verify assembled package on its target OS
+        shell: python
+        run: |
+          from pathlib import Path
+          import os, subprocess, zipfile
+          archive = next(Path('release/public').glob('*.zip'))
+          with zipfile.ZipFile(archive) as bundle:
+              bundle.extractall('release/smoke')
+          binary = next(Path('release/smoke').glob('*/el-launcher' + ('.exe' if os.name == 'nt' else '')))
+          binary.chmod(0o755)
+          subprocess.run([str(binary), 'verify', '--no-pause'], check=True)
+      - name: Verify empty-database startup and retained restart on Linux
+        if: matrix.os == 'linux'
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess
+          binary = next(Path('release/smoke').glob('*/el-launcher'))
+          try:
+              subprocess.run([str(binary), 'start', '--no-browser', '--no-pause'], check=True, timeout=1200, stdout=subprocess.DEVNULL)
+              subprocess.run([str(binary), 'stop', '--no-pause'], check=True, timeout=180, stdout=subprocess.DEVNULL)
+              subprocess.run([str(binary), 'start', '--no-browser', '--no-pause'], check=True, timeout=1200, stdout=subprocess.DEVNULL)
+          finally:
+              subprocess.run([str(binary), 'stop', '--no-pause'], timeout=180, stdout=subprocess.DEVNULL)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EL-${{ matrix.os }}-${{ matrix.arch }}
+          path: release/public/*
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
+
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: packages
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: EL-*
+          path: artifacts
+          merge-multiple: true
+      - name: Attach packages to a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EL_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$EL_TAG" --verify-tag --draft --title "$EL_TAG" --notes 'Windows/macOS 包内置 Docker Desktop 安装程序，Windows 同时内置 WSL；Linux 仍需通过发行版软件源安装 Docker。系统授权、许可确认或重启仍需用户完成。请先阅读包内 README。' artifacts/*

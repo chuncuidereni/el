@@ -1,0 +1,5 @@
+{"event_id":1,"user_id":101,"event":"page_view","page":"home"}
+{"event_id":2,"user_id":102,"event":"page_view","page":"products"}
+{"event_id":3,"user_id":101,"event":"add_to_cart","page":"products"}
+{"event_id":4,"user_id":103,"event":"page_view","page":"home"}
+{"event_id":5,"user_id":101,"event":"purchase","page":"checkout"}

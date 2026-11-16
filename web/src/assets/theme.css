@@ -1,0 +1,720 @@
+/*
+ * theme.css
+ *
+ * 职责：全局视觉主题：统一 Element Plus 颜色/圆角变量、应用骨架、表格、弹窗和层级色。
+ * 边界：变量值同时服务明暗主题和 themeGuards 测试；页面样式应复用这些变量，层级色通过 utils/layer.ts 的 CSS 变量名衔接。
+ */
+
+/* =====================================================================
+   EL · 数据工作台主题(亮/暗双主题)
+   - 默认亮色(:root);加 <html class="dark"> 切暗色
+   - 琥珀金(ClickHouse 系)强调色;Manrope/JetBrains Mono 字体
+   - 覆盖 Element Plus 的 CSS 变量 + 组件细节打磨
+
+   本文件是全局样式入口(main.ts 中引入),分三部分:
+     1) 品牌 / 语义 CSS 变量(亮暗两套)
+     2) Element Plus 变量覆盖(跟随亮暗切换)
+     3) 各组件(native + EP)的细节覆写与全局工具类
+   ===================================================================== */
+
+/* ---------------------------------------------------------------
+   亮色主题变量(:root,默认生效)
+   改动配色只需改这里的变量,组件样式统一引用变量而非硬编码色值
+   --------------------------------------------------------------- */
+:root {
+  /* 字体族:UI 用 Manrope(回退中文系统字体),代码/数据用等宽 JetBrains Mono */
+  --font-ui: "Manrope", "PingFang SC", "Microsoft YaHei", -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Consolas", "Courier New", monospace;
+
+  /* 亮色品牌(琥珀加深以保可读) */
+  --brand: #0052d9;
+  --brand-strong: #3378e8;
+  /* Logo 小字(DATA SYNC):亮色需比 --brand 深一档才在 #eceef2 侧栏上够读(4.76:1) */
+  --brand-logo: #a8c8ff;
+  /* 品牌色的低透明度填充,用于 hover 底 / 选中底 / 主按钮光晕 */
+  --brand-dim: rgba(0, 82, 217, 0.12);
+  /* 页面底色 / 面板(卡片、表格、弹窗内容)底色 */
+  --bg-page: #f5f7fa;
+  --bg-panel: #ffffff;
+  /* 侧边栏导航底色与其中的文字色(--sidebar-bg 为兼容旧引用的别名) */
+  --bg-sidebar: #001529;
+  --sidebar-bg: #001529;
+  --sidebar-text: #c5cbd4;
+  --sidebar-text-active: #ffffff;
+  /* 代码编辑器(CodeMirror)区域:底色 / 文字 / 行号槽 / 边框 */
+  --editor-bg: #f7f8fa;
+  --editor-text: #263238;
+  --editor-gutter: #eef1f4;
+  --editor-border: #dfe3e8;
+
+  /* 可随明暗翻转的悬浮 / 描边色(组件里统一引用;亮色用深色低透明度,暗色反过来用白色) */
+  --hover-bg: rgba(15, 23, 42, 0.05);
+  --hover-bg-strong: rgba(15, 23, 42, 0.09);
+  --fill-soft: rgba(15, 23, 42, 0.035);
+  /* 树/列表中「当前项」的高亮底(亮色取品牌色淡底) */
+  --tree-current: rgba(0, 82, 217, 0.08);
+  /* 自定义滚动条滑块色(见下方「滚动条」小节) */
+  --scroll-thumb: rgba(15, 23, 42, 0.25);
+  --scroll-thumb-hover: rgba(15, 23, 42, 0.4);
+}
+
+/* 暗色品牌 + 背景(需盖过 :root 亮色值) */
+/* 切换方式:html 上挂 class="dark"(见 index.html 首帧内联脚本),此处只需覆盖变化的变量 */
+html.dark {
+  --brand: #eab308;
+  --brand-strong: #f5c73e;
+  /* Logo 小字(DATA SYNC):比 --brand 收一档 —— 9px 小字用最亮的黄会“发光” */
+  --brand-logo: #d4a017;
+  --brand-dim: rgba(234, 179, 8, 0.12);
+  --bg-page: #0b0e14;
+  --bg-panel: #10151c;
+  --bg-sidebar: #0c0f15;
+  --hover-bg: rgba(255, 255, 255, 0.05);
+  --hover-bg-strong: rgba(255, 255, 255, 0.09);
+  --fill-soft: rgba(255, 255, 255, 0.04);
+  --tree-current: rgba(234, 179, 8, 0.14); /* 树选中极淡琥珀底 */
+  --scroll-thumb: rgba(255, 255, 255, 0.14);
+  --scroll-thumb-hover: rgba(255, 255, 255, 0.25);
+}
+
+/*
+ * 层级主色(标准源表 / 目标库表)。
+ * 用途:数据血缘、字段映射等界面按「层级」(ODS 源表 / DWD 目标表)着色区分。
+ *
+ * ⚠️ 必须分模式给色:同一串色值不可能在两种底上都合格 ——
+ *   原值 #f59e0b 在白底上只有 2.1:1(当文字用不达标),
+ *   而 #6366f1 在暗底上只有 3.4:1(同样不达标)。
+ *   所以亮色取深一档(600/700)、暗色取浅一档(300/400),两边都能过 4.5:1。
+ */
+:root {
+  --layer-ods: #0052d9;
+  --layer-dwd: #4f46e5; /* 白底 6.3:1 */
+}
+html.dark {
+  --layer-ods: #fbbf24; /* 暗底 ~10:1 */
+  --layer-dwd: #a5b4fc; /* 暗底 ~8:1 */
+}
+
+/* ---------------------------------------------------------------
+   亮色下把 Element Plus 默认(蓝)换成本品牌琥珀
+   EP 组件全部消费 --el-* 变量,故集中覆盖即可全局生效
+   light-3/5/7/8/9 为由浅到深的主色梯度,分别用于 hover/边框/浅底;dark-2 为实心按钮悬停色
+   --------------------------------------------------------------- */
+:root {
+  --el-color-primary: #2563eb;
+  --el-color-primary-light-3: #60a5fa;
+  --el-color-primary-light-5: #93c5fd;
+  --el-color-primary-light-7: #bfdbfe;
+  --el-color-primary-light-8: #dbeafe;
+  --el-color-primary-light-9: #eff6ff;
+  --el-color-primary-dark-2: #1d4ed8;
+  --el-bg-color: #ffffff;
+  --el-bg-color-page: #f5f7fa;
+  --el-bg-color-overlay: #ffffff;
+  --el-text-color-primary: #20252b;
+  --el-text-color-regular: #4b5563;
+  --el-text-color-secondary: #6b7280;
+  --el-text-color-placeholder: #9ca3af;
+  --el-text-color-disabled: #c4c9d0;
+  --el-border-color-dark: #c8cdd4;
+  --el-fill-color: #f4f6f8;
+  --el-fill-color-light: #f7f8fa;
+  --el-fill-color-lighter: #fafbfc;
+  --el-fill-color-blank: #ffffff;
+}
+
+/* ---------- Element Plus 变量覆盖(强制深色) ---------- */
+html.dark {
+  --el-color-primary: #eab308;
+  /*
+   * ⚠️ 暗色下 light-N / dark-2 的语义与亮色【相反】,必须跟 EP 官方暗色主题一致:
+   *   light-3..9 → 向【暗背景】混色(越往后越暗),用作「浅主色底」
+   *                (plain 按钮 / tag / 菜单 hover 都拿 light-9 当底色)
+   *   dark-2     → 比主色【更亮】,用作实心按钮的悬停色
+   *
+   * 以前这里写成了向白混的奶油色(#f0c247…#fbefd3)+ 变暗的 dark-2:
+   *   暗色界面上所有「浅主色底」的控件会变成近白块、上面又是主色黄字
+   *   (对比度 ≈1.4:1,基本读不清),实心按钮悬停还会反而变暗。
+   * 数值 = 主色 #EAB308 与面板底色 #10151C 按比例混合。
+   */
+  --el-color-primary-light-3: #977710;
+  --el-color-primary-light-5: #6c5714;
+  --el-color-primary-light-7: #493e17;
+  --el-color-primary-light-8: #373118;
+  --el-color-primary-light-9: #2a281a;
+  --el-color-primary-dark-2: #edbc26;
+
+  --el-bg-color: #10151c;
+  --el-bg-color-page: #0b0e14;
+  --el-bg-color-overlay: #161c26;
+
+  --el-text-color-primary: #e8edf3;
+  --el-text-color-regular: #c3ccd6;
+  --el-text-color-secondary: #8793a1;
+  --el-text-color-placeholder: #5c6671;
+  --el-text-color-disabled: #3f4750;
+
+  --el-border-color: #2a313c;
+  --el-border-color-light: #232a34;
+  --el-border-color-lighter: #1c222b;
+  --el-border-color-extra-light: #171d25;
+  --el-border-color-dark: #333b47;
+  --el-border-color-hover: #3a434f;
+
+  --el-fill-color: #1a212b;
+  --el-fill-color-light: #161d26;
+  --el-fill-color-lighter: #131921;
+  --el-fill-color-extra-light: #11161e;
+  --el-fill-color-blank: #10151c;
+  /*
+  * 输入框单独抬一档(专用变量,只影响输入框/选择器)。
+  *
+  * ⚠️ 不能用 --el-fill-color-blank 去抬:它【同时是表格/卡片的底色】,
+  *    抬高会把「表头(#161d26) vs 表体」的层次压平。
+  * ⚠️ 原值 transparent 也不对:EP 官方暗色是实色(= bg-color),
+  *    transparent 会让页面底色从控件里透出来,输入框/表格看起来“平”。
+  */
+  --el-input-bg-color: #151c26;
+
+  --el-mask-color: rgba(4, 7, 11, 0.6);
+  --el-box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  --el-border-radius-base: 6px;
+}
+
+/* 亮色文本/边框/填充(Element 默认已适配,微调边框对比度) */
+:root {
+  --el-border-color: #dfe3e8;
+  --el-border-color-light: #e8ebef;
+  --el-border-color-lighter: #eef0f3;
+  --el-border-color-extra-light: #f4f5f7;
+  --el-border-color-hover: #93b4ee;
+}
+
+/* ---------------------------------------------------------------
+   基础重置:统一盒模型与整屏高度,并把字体/底色挂到 body
+   (html/body/#app 撑满视口,是 SPA 布局不出现双滚动条的前提)
+   --------------------------------------------------------------- */
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+body {
+  font-family: var(--font-ui);
+  color: var(--el-text-color-primary);
+  background: var(--bg-page);
+  /* 抗锯齿与字体渲染优化,提升暗色下小字可读性 */
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* 主题切换时背景/文字平滑过渡,避免生硬闪变 */
+  transition:
+    background 0.25s ease,
+    color 0.25s ease;
+}
+
+/* ---------------------------------------------------------------
+   滚动条:仅 WebKit/Chromium 生效(Firefox 走 scrollbar-width,未在此覆盖)
+   颜色取自 --scroll-thumb / --scroll-thumb-hover,随明暗自动翻转;
+   用 background-clip: content-box + 透明边框把滑块「瘦身」成细条
+   --------------------------------------------------------------- */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+  transition: background 0.2s ease;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+/* ---------------------------------------------------------------
+   按钮:统一字重;主按钮去掉描边并加品牌色光晕;
+   plain 变体用品牌色描边 + 透明底,避免 EP 默认浅底在两种主题下不协调
+   --------------------------------------------------------------- */
+.el-button {
+  font-weight: 500;
+  height: 32px;
+  min-height: 32px;
+  font-size: 13px;
+}
+.el-button .el-icon {
+  font-size: 16px;
+}
+.el-button--primary {
+  border-color: transparent;
+}
+.el-button--primary:not(.is-disabled):hover {
+  box-shadow: 0 2px 14px var(--brand-dim);
+}
+.el-button--primary.is-plain {
+  background: transparent;
+  border-color: var(--brand-strong);
+  color: var(--brand-strong);
+}
+.el-button--primary.is-plain:hover {
+  background: var(--brand-dim);
+}
+
+/* ---------------------------------------------------------------
+   表格「操作」列按钮(全局)
+   - .op-btn:操作列里的下拉触发按钮(「操作 ⌄」),多数页面用 primary + plain
+   - .op-act:行内的文字操作按钮(查看/编辑/删除/打开…)
+   背景:这两类按钮原来是 size="small" 默认规格,EP 小尺寸仅 24px 高、
+   灰色/浅描边在密集表格里扫读时不够显眼。这里统一把点击区放大、
+   并把文字与描边加深一档;具体色相仍沿用各按钮自身的语义色
+   (danger 保持红、success 保持绿),只加深「默认灰」这一类。
+   --------------------------------------------------------------- */
+.el-button.op-btn {
+  height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 600;
+  /*
+   * plain 变体:常态用深一档主色 + 实色描边(EP 默认描边只到 light-5,偏浅);
+   * 悬停改为「浅主色底 + 深主色字」而非实心填充 —— 实心填充在暗色主题下
+   * 是琥珀底 + 白字(EP 的 hover 文字色固定为白色),对比度反而差。
+   */
+  --el-button-text-color: var(--el-color-primary-dark-2);
+  --el-button-border-color: var(--el-color-primary);
+  --el-button-hover-text-color: var(--el-color-primary-dark-2);
+  --el-button-hover-bg-color: var(--el-color-primary-light-9);
+  --el-button-hover-border-color: var(--el-color-primary);
+}
+/* 行内操作按钮:同样的规格,点击区略小于下拉触发器(避免把表格行撑高) */
+.el-button.op-act {
+  height: 32px;
+  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+/* 只加深「默认灰」按钮;primary/danger/warning 等保留自身语义色,避免删按钮变蓝 */
+.el-button.op-act.el-button--default {
+  --el-button-text-color: var(--el-text-color-primary);
+  --el-button-hover-text-color: var(--el-color-primary-dark-2);
+  --el-button-hover-bg-color: var(--el-color-primary-light-9);
+  --el-button-hover-border-color: var(--el-color-primary);
+}
+/* link 变体(如「打开」):EP 的 link 常态就是主色,这里收深一档并抬字重 */
+.el-button.op-act.is-link {
+  font-weight: 600;
+  --el-button-text-color: var(--el-color-primary-dark-2);
+  --el-button-hover-text-color: var(--el-color-primary-dark-2);
+  --el-button-hover-link-text-color: var(--el-color-primary-dark-2);
+}
+
+/* ---------------------------------------------------------------
+   表格:去掉 EP 默认实底,改成透明 + 细分隔线,让表格融入面板;
+   表头用小号灰字 + 字距,表体数字用 tabular-nums 等宽对齐(数据密集场景可读性)
+
+   ⚠️ 字号口径:这里是【全站表格基准】。数据库操作相关的页面与组件
+      (数据探索 / 数据库 / 标准源表 / 目标库表,以及它们渲染的字段配置、构建器、
+      结果表、表详情等)整体比全站基准【大一档】:正文 13~14、辅助文字 12、
+      徽标/序号 11。改这些文件时别再按下面 .dim(12px)/.muted(11px) 那段的口径往回调,
+      它们不是"超标",是本轮用户明确要求的。
+   --------------------------------------------------------------- */
+.el-table {
+  --el-table-border-color: var(--el-border-color-lighter);
+  --el-table-header-bg-color: var(--bg-panel);
+  --el-table-tr-bg-color: transparent;
+  --el-table-expanded-cell-bg-color: transparent;
+  --el-table-row-hover-bg-color: var(--brand-dim);
+  background: transparent;
+  font-size: 14px;
+}
+/* 外框统一:所有带 border 的表格都是同一套 8px 圆角外框,
+   页面不再各自套一层边框(否则有的页面双线、有的页面没有框) */
+.el-table--border {
+  border-radius: 8px;
+}
+/*
+  全站表头统一标准:所有页面的 el-table 不管写没写 size(默认 / small / large),
+  表头高度、字号、字重、底色都走这一条。padding 必须挂在带 th 的选择器上 ——
+  它的特异性高于 .el-table--small/.el-table--default 的 .el-table__cell{padding:…},
+  否则 small 表格(数据探索、标准源表、目标库表)会被压成 4px 的扁表头。
+*/
+.el-table th.el-table__cell {
+  background: var(--bg-panel);
+  color: var(--el-text-color-secondary);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.03em;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.el-table td.el-table__cell {
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.el-table .cell {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+/* 列表页:新增与批量操作统一紧贴表格左上方。 */
+.list-table-ops,
+.list-table-ops-start {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.list-table-ops {
+  justify-content: space-between;
+  flex: none;
+  padding: 0 0 8px;
+}
+
+/* ---------------------------------------------------------------
+   树(库/表结构导航):行高与圆角紧凑化;选中态详见下方 is-current 规则
+   --------------------------------------------------------------- */
+.el-tree {
+  background: transparent;
+  color: var(--el-text-color-regular);
+}
+.el-tree-node__content {
+  height: 30px;
+  border-radius: 6px;
+  margin: 1px 0;
+  padding-right: 6px;
+}
+.el-tree-node__content:hover {
+  background: var(--hover-bg);
+}
+.el-tree-node.is-current > .el-tree-node__content {
+  /* 选中:淡琥珀底 + 左侧品牌竖条,文字保留原色(避免整行重色/与图标打架) */
+  background: var(--tree-current);
+  box-shadow: inset 2px 0 0 0 var(--brand);
+  color: inherit;
+}
+.el-tree-node.is-current > .el-tree-node__content .el-tree-node__label,
+.el-tree-node.is-current > .el-tree-node__content .node-label {
+  color: var(--brand-strong);
+}
+.el-tree-node__expand-icon {
+  color: var(--el-text-color-secondary);
+}
+.el-tree-node__expand-icon.is-leaf {
+  color: transparent;
+}
+
+/* ---------------------------------------------------------------
+   标签页:默认态用次级灰、激活态用品牌色;active-bar 收细为 2px;
+   card 型页签改为「上圆角卡片」并去掉 EP 默认的外框线,贴合面板观感
+   --------------------------------------------------------------- */
+.el-tabs__header {
+  margin-bottom: 12px;
+}
+.el-tabs__nav-wrap::after {
+  background-color: var(--el-border-color-lighter);
+  height: 1px;
+}
+.el-tabs__item {
+  font-weight: 500;
+  color: var(--el-text-color-secondary);
+}
+.el-tabs__item.is-active {
+  color: var(--brand-strong);
+}
+.el-tabs__item:hover {
+  color: var(--el-text-color-primary);
+}
+.el-tabs__active-bar {
+  background: var(--brand);
+  height: 2px;
+  border-radius: 2px;
+}
+.el-tabs--card > .el-tabs__header {
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.el-tabs--card > .el-tabs__header .el-tabs__item {
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  margin-right: 4px;
+}
+.el-tabs--card > .el-tabs__header .el-tabs__item.is-active {
+  background: var(--bg-panel);
+  border-color: var(--el-border-color-lighter);
+  color: var(--brand-strong);
+}
+.el-tabs--card > .el-tabs__header .el-tabs__nav {
+  border: none;
+}
+.el-tabs--card > .el-tabs__header .el-tabs__item .is-icon-close {
+  margin-left: 6px;
+  border-radius: 4px;
+}
+.el-tabs--card > .el-tabs__header .el-tabs__item .is-icon-close:hover {
+  background: var(--hover-bg-strong);
+}
+
+/* ---------- 输入/下拉/文本域 ---------- */
+/*
+  表单控件统一为「内描边圆角框」;下拉浮层用 overlay 底色 + 品牌色 hover/选中。
+  注意:下拉是 teleport 到 body 的,必须写在全局(不能放 scoped 样式里)。
+*/
+/*
+  ⚠️ 这里一直硬写 --bg-panel,把深色主题里专为输入框定义的 --el-input-bg-color
+  (#151c26,见 docs/配色与主题约定.md)盖成了死代码 —— 文档写的"输入框比面板亮一档"
+  从未生效。现在按文档回落:有 --el-input-bg-color 就用它,没有再用面板色。
+  ⚠️ 兜底值必须【再包一层 var()】:写成 var(--el-input-bg-color, --bg-panel) 是无效 CSS,
+     整条声明会被丢弃(评审报告给的 diff 里就是错的,别照抄)。
+*/
+.el-input__wrapper,
+.el-textarea__inner {
+  background: var(--el-input-bg-color, var(--bg-panel));
+  box-shadow: 0 0 0 1px var(--el-border-color) inset;
+  border-radius: 6px;
+}
+.el-input__wrapper.is-focus,
+.el-textarea__inner:focus {
+  box-shadow: 0 0 0 1px var(--el-color-primary) inset;
+}
+.el-input__inner,
+.el-textarea__inner {
+  font-family: inherit;
+}
+.el-select-dropdown,
+.el-dropdown-menu,
+.el-popper.is-light {
+  background: var(--el-bg-color-overlay);
+  border: 1px solid var(--el-border-color-lighter);
+}
+.el-select-dropdown__item.is-hovering,
+.el-select-dropdown__item:hover {
+  background: var(--brand-dim);
+}
+.el-select-dropdown__item.is-selected {
+  color: var(--brand-strong);
+}
+/* 下拉选项里「字段名 + 备注」的展示(el-select 下拉 teleport 到 body,需全局样式) */
+.el-select-dropdown__item .opt-name {
+  color: var(--el-text-color-regular);
+}
+.el-select-dropdown__item .opt-comment {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
+}
+
+/* ---------------------------------------------------------------
+   弹窗:遮罩加模糊弱化背景;对话框用 overlay 底色 + 大圆角 + 分隔线的三段式结构
+   (标题栏 / 内容 / 底栏各自补一条分隔线,内容过长时的限高见文末「口径统一」)
+   --------------------------------------------------------------- */
+.el-overlay {
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(3px);
+}
+.el-dialog {
+  background: var(--el-bg-color-overlay);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 12px;
+}
+.el-dialog__title {
+  font-weight: 700;
+}
+.el-dialog__header {
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  margin-right: 0;
+  padding: 14px 18px;
+}
+.el-dialog__body {
+  padding: 18px;
+}
+.el-dialog__footer {
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+/* ---------------------------------------------------------------
+   消息/提示:toast 与 MessageBox 统一用浮层底色 + 半透明模糊,浮在内容之上仍可读
+   --------------------------------------------------------------- */
+.el-message {
+  background: var(--el-bg-color-overlay);
+  border-color: var(--el-border-color);
+  border-radius: 8px;
+  backdrop-filter: blur(4px);
+}
+.el-message-box {
+  background: var(--el-bg-color-overlay);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 12px;
+}
+
+/* ---------------------------------------------------------------
+   菜单(侧边栏):菜单底透明,交由侧栏容器控制底色;
+   条目做成圆角「胶囊」,hover 淡底、激活为品牌淡底 + 品牌字重;
+   另处理折叠态与折叠弹出的浮层子菜单(浮层会 teleport 出 DOM 树,故用全局类)
+   --------------------------------------------------------------- */
+.el-menu {
+  background: transparent;
+  border-right: none;
+}
+.el-menu-item,
+.el-sub-menu__title {
+  color: var(--el-text-color-secondary);
+  border-radius: 8px;
+  margin: 2px 8px;
+  height: 42px;
+  line-height: 42px;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+.el-menu-item:hover,
+.el-sub-menu__title:hover {
+  background: var(--hover-bg);
+  color: var(--el-text-color-primary);
+}
+.el-menu-item.is-active {
+  background: var(--brand-dim);
+  color: var(--brand-strong);
+  font-weight: 600;
+}
+.el-menu-item.is-active .el-icon {
+  color: var(--brand-strong);
+}
+/* 展开分组时标题栏:保持半透明高亮,不用 Element 默认的实心高亮 */
+.el-sub-menu.is-opened > .el-sub-menu__title,
+.el-sub-menu:hover > .el-sub-menu__title {
+  color: var(--brand-strong);
+}
+.el-sub-menu__icon-arrow {
+  color: var(--el-text-color-placeholder);
+}
+/* 折叠态(仅图标)分组标题去掉两侧留白,避免溢出 */
+.side-menu.el-menu--collapse .el-menu-item,
+.side-menu.el-menu--collapse .el-sub-menu__title {
+  margin: 2px 6px;
+  padding: 0;
+}
+/* 分组内子菜单容器透明 */
+.side-menu .el-menu--inline {
+  background: transparent;
+}
+/* 折叠弹出的浮动子菜单 */
+/*
+  ⚠️ 这里原本写 var(--page-bg, #fff) —— 但 --page-bg 全项目【从未定义过】,
+  所以取的一直是兜底值 #fff:深色模式下浮层是纯白底,里面的菜单项却用深色主题文字,
+  几乎看不清(评审扫描发现,已核实)。改用 EP 自己的浮层底色,明暗两套自动跟随。
+*/
+.side-menu .el-menu--popup {
+  background: var(--el-bg-color-overlay);
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 10px;
+  padding: 6px;
+}
+.side-menu .el-menu--popup .el-menu-item {
+  background: transparent;
+  margin: 2px 4px;
+}
+
+/* ---------------------------------------------------------------
+   分页:去掉页码/按钮底色,只保留文字与边框;.table-pager 为列表页底部分页条的通用容器
+   --------------------------------------------------------------- */
+.el-pagination {
+  --el-pagination-bg-color: transparent;
+  --el-pagination-button-bg-color: transparent;
+}
+.table-pager {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+  padding-top: 10px;
+  /* 沿用当前页面或抽屉的底色，避免白底抽屉中出现灰色底块。 */
+  background: transparent;
+  box-shadow: none;
+}
+
+/* ---------------------------------------------------------------
+   空状态:描述文字降为次级灰,避免空列表时一片高对比黑字抢视线
+   --------------------------------------------------------------- */
+.el-empty__description p {
+  color: var(--el-text-color-secondary);
+}
+
+/* =====================================================================
+   EL 默认值的“口径统一” —— 这些默认值单看没问题,放进表单/弹窗就变成
+   莫名空隙与错位。写在全局,新页面不用各自打补丁(以前就是每页各修一次)。
+
+   每条都注明 EP 的原始值,便于以后升级 EP 时对照。
+   ===================================================================== */
+
+/*
+  1) 折叠面板:EP 默认
+       .el-collapse-item__header  { min-height:48px; line-height:48px; padding:0 }
+       .el-collapse-item__content { padding-bottom:25px; line-height:1.76923 }
+     → 标题又高又贴左边、内容底部一大截。
+     ⚠️ 只写 height 是无效的:必须连 min-height 一起覆盖(踩过)。
+*/
+.el-collapse-item__header {
+  min-height: 36px;
+  line-height: 1.4;
+  padding: 6px 8px;
+}
+.el-collapse-item__content {
+  padding: 4px 8px 12px;
+  line-height: 1.6;
+}
+
+/*
+  2) 表单最后一项:EP 只把【嵌套】的表单项清零(margin-bottom:0),最后一项照样留 18px
+     → 弹窗底部、卡片底部永远多一截空白。
+*/
+.el-form > .el-form-item:last-child,
+.el-form > .el-form-item:last-of-type {
+  margin-bottom: 0;
+}
+
+/*
+  3) 弹窗内容区:EP 只给 padding:18px,没有限高
+     → 字段一多就把「取消/保存」顶出屏幕(而且拉不到)。
+     限高 + 内部滚动;内容装得下时完全看不出来。
+*/
+.el-dialog__body {
+  max-height: 74vh;
+  overflow-y: auto;
+}
+/* 顶到屏幕上限时,内容区滚动条贴边留点余量,不要压在圆角上 */
+.el-dialog__body::-webkit-scrollbar { width: 8px; }
+
+/*
+  「灰字」:占位符(—)、时间戳、条数说明这类辅助信息。
+  ⚠️ 以前三个页面各写一份,而且【只有颜色没有字号】→ 继承容器(通常 14px 正文),
+     在密集列表里明显偏大(用户反馈"muted 字体有点大")。
+  全项目次级文字以 12px 为准(统计:12px 172 处 / 13px 78 处 / 11px 62 处)。
+*/
+.dim {
+  color: var(--el-text-color-placeholder);
+  font-size: 12px;
+}
+
+/*
+  「更小的灰字」:折叠头旁边的数量说明(「3 张表 · 已选 5 列」)、表格上方的一行提示
+  (「聚合 · 处理链 · 别名 · 输出」)这类附属信息。
+  ⚠️ 这个类以前【只在少数几个页面各自定义】,数据探索的两个组件(FieldRuleTable / ExploreWizard)
+     用了十几次却一处定义都没有 → 按继承的正文号(13~14px)渲染,看着就是"字体有点大"。
+     这里给一份全局默认:与 SftpFilePreview 里已有的那份一致(secondary 灰 + 11px)。
+  与 .dim 的分工:.dim 是列表里的密集次要信息(12px),.muted 是更小一号的附属说明(11px)。
+*/
+.muted {
+  color: var(--el-text-color-secondary);
+  font-size: 11px;
+}

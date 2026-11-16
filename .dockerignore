@@ -1,0 +1,33 @@
+# 本地 IDE、代理状态和凭据不应进入镜像构建上下文。
+# 本地 IDE metadata and agent state never belong in the image build context.
+.git
+.idea
+.vscode
+.agents
+.codex
+.aws
+
+# Runtime/deployment secrets are mounted or injected at container start.
+# Excluding every application profile is intentional: a local Docker build must
+# not bake application-test.yml credentials into the final JAR.
+.env
+.env.*
+
+config
+src/main/resources/application.yml
+src/main/resources/application-*.yml
+
+# Generated artifacts and development-only material are rebuilt by Docker.
+data
+target
+docs
+tests
+src/test
+release
+docker/offline
+**/__pycache__
+**/coverage
+backup-*
+**/node_modules
+**/dist
+**/*.tsbuildinfo

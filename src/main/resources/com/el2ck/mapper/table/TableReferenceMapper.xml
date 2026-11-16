@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 【文件职责】维护表引用关系查询，为删除保护和工作流依赖检查提供数据。
+     修改语句时需同步检查参数名、结果映射、列名、排序和事务语义；SQL 内容本身不应由注释改动。 -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  改表名前扫描「谁引用了这张表」用的只读映射。namespace 对应
+  com.el2ck.mapper.table.TableReferenceMapper,语句 id 与接口方法同名(一一对应):configurations / savedSql。
+  该接口两个方法都无 @Param(无入参),结果统一用 java.util.Map 承载各表异构列。
+
+  ⚠️ 本文件的 SQL 有两条不能按字面理解的方言约定(由 repository/metadata/MetadataSqlDialect.mysql()
+     在驱动边界统一改写,编辑时必须遵守,否则运行期会报表不存在或语法错误):
+       1) 表名写「逻辑名」:这里写 arb_workflows / wide_table_tasks / query_workflows / wf_tasks / sql_queries,
+          实际执行时被改写为 el_ 前缀表。不要在 SQL 里自己写 el_ 前缀,也不要新增未登记的表;
+       2) 时间函数沿用旧写法 datetime('now'),执行前会被改写为 UTC_TIMESTAMP()
+          (库内时间统一按 UTC 存取,与连接的 time_zone 设置一致;本文件虽未用到,约定同样适用)。
+  另注:database / sql 是 MySQL 保留字,由方言统一加反引号,按列名原样写即可,不要自己加引号。
+-->
+<mapper namespace="com.el2ck.mapper.table.TableReferenceMapper">
+
+    <!--
+      汇合 5 类「保存的配置」为统一列,供改表名前递归扫描其引用。参数无;
+      返回 List<Map>,键为 kind / id / name / conn / db / tbl / payload。无副作用(只读)。
+      ⚠️ UNION 的结果列名以第一段 SELECT 的 AS 别名为准,后续各段只按位置对齐 ——
+         所以第一段(arb)的 connection_id AS conn、target_db AS db、target_table AS tbl、
+         config_json AS payload 不是装饰,正是结果 Map 的键名;改动要谨慎。
+      几处反直觉之处:
+         - conn = 0 表示该配置未绑定连接(运行时继承选择),调用方按「不排除」处理,不能当作真实连接 ID 比较;
+         - payload 取各表的 JSON 配置载体列:arb/wide/query 用 config_json、dag 用 nodes_json、visual 用 visual_config;
+         - visual 段带 WHERE visual_config != '',只挑出可视化配置非空的已保存查询,其余查询不在本结果里。
+    -->
+    <select id="configurations" resultType="java.util.Map">
+        SELECT 'arb' AS kind, id, name, connection_id AS conn, target_db AS db, target_table AS tbl,
+        config_json AS payload
+        FROM arb_workflows
+        UNION ALL SELECT 'wide' , id, name, 0, target_db, target_table, config_json
+        FROM wide_table_tasks
+        UNION ALL SELECT 'query' , id, name, 0, '' , '' , config_json
+        FROM query_workflows
+        UNION ALL SELECT 'dag' , id, name, 0, '' , '' , nodes_json
+        FROM wf_tasks
+        UNION ALL SELECT 'visual' , id, name, 0, database, '' , visual_config
+        FROM sql_queries
+        WHERE visual_config != ''
+    </select>
+
+    <!--
+      全部已保存 SQL(仅过滤 sql_text 非空的行,不做其他筛选)。参数无;
+      返回 List<Map>,键为 id / name / db / sql。无副作用(只读)。
+      调用方只能对 SQL 文本做词法判断(命中即视为「可能引用」,不保证精确),故 db / sql 原样带出。
+      注:db 取自 database 列(保留字,方言会加反引号),sql 取自 sql_text(避免与保留字 sql 冲突故起别名 sql)。
+    -->
+    <select id="savedSql" resultType="java.util.Map">
+        SELECT id, name, database AS db, sql_text AS sql
+        FROM sql_queries
+        WHERE sql_text != ''
+    </select>
+    <!-- 执行锁覆盖“已占用执行权但运行记录尚未创建”的窗口；排队任务尚未读写表。 -->
+    <select id="runningSyncTasks" resultType="java.util.Map" useCache="false" flushCache="true">
+        SELECT t.id, t.name, t.connection_id AS conn, t.target_db AS db, t.target_table AS tbl,
+               t.source_object, d.id AS source_id, d.type AS source_type, d.config_enc
+        FROM sync_tasks t LEFT JOIN data_sources d ON d.id=t.data_source_id
+        WHERE EXISTS(SELECT 1 FROM sync_runs r WHERE r.task_id=t.id AND r.status='running')
+           OR IS_USED_LOCK(CONCAT('el_sync_task_',t.id)) IS NOT NULL
+    </select>
+
+    <select id="runningConfigurations" resultType="java.util.Map" useCache="false" flushCache="true">
+        SELECT 'arb' AS kind, w.id, w.name, w.connection_id AS conn, w.target_db AS db,
+               w.target_table AS tbl, w.config_json AS payload
+        FROM arb_workflows w
+        WHERE EXISTS(SELECT 1 FROM arb_workflow_runs r WHERE r.workflow_id=w.id AND r.status='running')
+           OR IS_USED_LOCK(CONCAT('el_arb_workflow_',w.id)) IS NOT NULL
+        UNION ALL
+        SELECT 'dag', w.id, w.name, 0, '', '', w.nodes_json FROM wf_tasks w
+        WHERE EXISTS(SELECT 1 FROM wf_runs r WHERE r.workflow_id=w.id AND r.status='running')
+        UNION ALL
+        SELECT 'query', w.id, w.name, 0, '', '', w.config_json FROM query_workflows w
+        WHERE EXISTS(SELECT 1 FROM query_workflow_runs r WHERE r.workflow_id=w.id AND r.status='running')
+    </select>
+    <select id="referencedSource" resultType="com.el2ck.entity.datasource.DataSource">
+        SELECT id, type, config_enc FROM data_sources WHERE id=#{id}
+    </select>
+</mapper>

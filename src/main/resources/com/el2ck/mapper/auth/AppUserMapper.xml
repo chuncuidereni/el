@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 【文件职责】维护用户账号、密码版本和启用状态的 MyBatis SQL 映射。
+     修改语句时需同步检查参数名、结果映射、列名、排序和事务语义；SQL 内容本身不应由注释改动。 -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  平台登录用户表(el_app_users)的 MyBatis 映射。namespace 对应 com.el2ck.mapper.auth.AppUserMapper,
+  每个语句的 id 对应该接口的方法名:listAll / findByUsername / findById / count / insert /
+  updateRole / updatePassword / delete。
+
+  ⚠️ 本文件里的 SQL 有两条不能按字面理解的约定(由 repository/metadata/MetadataSqlDialect.mysql()
+     在驱动边界统一改写,编辑本文件时必须遵守,否则会在运行期报表不存在或语法错误):
+       1) 表名写「逻辑名」:这里写 app_users,实际执行时被改写为 el_app_users。
+          不要在 SQL 里自己写 el_ 前缀,也不要新增未在 MetadataSqlDialect.TABLES 登记的表;
+       2) 时间函数沿用一个旧写法 datetime('now'),执行前会被改写为 UTC_TIMESTAMP()
+          (库内时间统一按 UTC 存取,见 MysqlMetadataDataSource 的 time_zone 设置)。
+
+  列名映射:本文件每一列的列名都能被 map-underscore-to-camel-case 自动映射到实体
+  (password_hash→passwordHash、created_at→createdAt …),所以这里不需要任何 AS 别名
+  —— 别照抄 ConnectionMapper 那种起别名的写法,那是为了绕开 Lombok 的 is 前缀属性名。
+-->
+<mapper namespace="com.el2ck.mapper.auth.AppUserMapper">
+
+    <!--
+      全部平台账号。⚠️ 实际按 id 倒序(最新创建的在前),这与 AppUserMapper#listAll 与
+      AppUserService#list 的 javadoc 里写的「按 id 升序」不符 —— 以本 XML 为准。
+      另外结果里带出了 password_hash 与 salt 两列(实体承载摘要与盐),若上层直接把这个
+      实体列表序列化回前端就会泄露摘要;是否脱敏由调用方负责,本语句不做裁剪。
+    -->
+    <select id="listAll" resultType="com.el2ck.entity.auth.AppUser">
+        SELECT id, username, password_hash, salt, role, created_at, updated_at
+        FROM app_users
+        ORDER BY id DESC
+    </select>
+
+    <!--
+      按用户名取单个账号,登录校验路径(AppUserService.verify → BasicAuthFilter)。
+      返回含 salt 与 password_hash 的完整实体,校验在服务层做常量时间比对。
+      username 列有 UNIQUE 约束,故最多命中一行;查不到返回 null。
+    -->
+    <select id="findByUsername" resultType="com.el2ck.entity.auth.AppUser">
+        SELECT id, username, password_hash, salt, role, created_at, updated_at
+        FROM app_users
+        WHERE username = #{username}
+    </select>
+
+    <!--
+      按主键取单个账号。调用方 AppUserService.get 用它做存在性校验(查不到返回 null,
+      由服务层决定抛 404 还是放行),改角色 / 改密 / 删除前都会先走一遍。
+    -->
+    <select id="findById" resultType="com.el2ck.entity.auth.AppUser">
+        SELECT id, username, password_hash, salt, role, created_at, updated_at
+        FROM app_users
+        WHERE id = #{id}
+    </select>
+
+    <!--
+      账号总数。启动播种用它判断表是否为空:StartupConfiguration.seedLoginAdmin 在
+      mapper.count() != 0 时直接返回,不会覆盖已改过的管理员密码 —— 所以这里是全表 COUNT,
+      不要加上任何 WHERE 过滤,否则会破坏「表非空即不播种」的幂等保证。
+    -->
+    <select id="count" resultType="java.lang.Long">
+        SELECT COUNT(*)
+        FROM app_users
+    </select>
+
+    <!--
+      新增账号。useGeneratedKeys + keyProperty 把自增主键回填到入参 AppUser.id 上,
+      AppUserService.create 依赖回填后的 id 直接返回落库对象。
+      两个时间列在这里显式写 datetime('now')(建表虽有 DEFAULT CURRENT_TIMESTAMP),
+      目的是让写入时刻也统一走 UTC_TIMESTAMP() 口径;其余列由服务层算好后传入
+      (salt 必须与 password_hash 一致)。
+    -->
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO app_users (username, password_hash, salt, role, created_at, updated_at)
+        VALUES ( #{username} , #{passwordHash} , #{salt} , #{role} , datetime( 'now' ), datetime( 'now' ))
+    </insert>
+
+    <!--
+      只改角色,顺带刷新 updated_at(用库侧时间,不依赖应用机器时钟)。
+      入参 role 由 AppUserService 归一到 admin / user 后才传进来;库里对该列没有 CHECK 约束,
+      直接改库可以写入任意值,不要以为数据库会兜底。
+    -->
+    <update id="updateRole">
+        UPDATE app_users
+        SET role = #{role} , updated_at = datetime( 'now' )
+        WHERE id = #{id}
+    </update>
+
+    <!--
+      改密码。⚠️ password_hash 与 salt 必须成对更新:salt 是 hex(sha256(salt||明文)) 的一部分,
+      只换摘要不换盐(或反之)会让该账号再也无法登录。回填 0 行表示 id 不存在,
+      但调用方 AppUserService 已先做存在性校验。
+    -->
+    <update id="updatePassword">
+        UPDATE app_users
+        SET password_hash = #{passwordHash} , salt = #{salt} , updated_at = datetime( 'now' )
+        WHERE id = #{id}
+    </update>
+
+    <!--
+      删除账号行。⚠️ 这里没有任何级联,也没有引用保护:
+        - 表间无外键,删除不会波及别的表;user_remarks.user_name 指的是 ClickHouse 用户,
+          与平台账号同名也无关,那些备注既不清理也不该清理;
+        - AppUserService.delete 只做存在性校验,**不阻止删掉最后一个 admin** —— 删空后
+          平台将无法登录(这是代码里明确接受的取舍,不是遗漏)。
+      另外单独调用本 Mapper 方法会绕过上述校验,请走 service。
+    -->
+    <delete id="delete">
+        DELETE
+        FROM app_users
+        WHERE id = #{id}
+    </delete>
+</mapper>

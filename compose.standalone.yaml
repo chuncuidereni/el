@@ -1,0 +1,77 @@
+# Only selected by deploy.sh in standalone mode. No database ports are published.
+services:
+  app:
+    environment:
+      DEPLOYMENT_MODE: standalone
+      APP_METADATA_URL: jdbc:mysql://mysql:3306/eltock?useUnicode=true&characterEncoding=UTF-8&serverTimezone=UTC&useSSL=false&allowPublicKeyRetrieval=true
+      APP_METADATA_USERNAME: el2ck
+      APP_METADATA_PASSWORD: ${BUNDLED_MYSQL_PASSWORD:?Package standalone credentials first}
+      APP_SECRETKEY: ${BUNDLED_APP_SECRET_KEY:?Package standalone credentials first}
+      APP_USER: admin
+      APP_PASSWORD: ${BUNDLED_ADMIN_PASSWORD:?Package standalone credentials first}
+      APP_DEFAULTCK_HOST: clickhouse
+      APP_DEFAULTCK_PROTOCOL: http
+      APP_DEFAULTCK_PORT: "8123"
+      APP_DEFAULTCK_DATABASE: default
+      APP_DEFAULTCK_USERNAME: el2ck_admin
+      APP_DEFAULTCK_PASSWORD: ${BUNDLED_CK_PASSWORD:?Package standalone credentials first}
+      APP_DEFAULTCK_SECURE: "false"
+      CK_MANAGEMENT_ENABLED: "true"
+      CK_MANAGEMENT_USERNAME: el2ck_admin
+      CK_MANAGEMENT_PASSWORD: ${BUNDLED_CK_PASSWORD:?Package standalone credentials first}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    volumes:
+      # A different mount target would retain the external app-data mount; this
+      # same target deliberately replaces it when Compose merges the files.
+      - standalone-app-data:/app/data
+  mysql:
+    image: mysql:8.0.46
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${BUNDLED_MYSQL_ROOT_PASSWORD:?Package standalone credentials first}
+      MYSQL_DATABASE: eltock
+      MYSQL_USER: el2ck
+      MYSQL_PASSWORD: ${BUNDLED_MYSQL_PASSWORD:?Package standalone credentials first}
+      TZ: Asia/Shanghai
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_bin"]
+    volumes:
+      - standalone-mysql-data:/var/lib/mysql
+      - ./docker/standalone/mysql-init:/docker-entrypoint-initdb.d:ro
+      - ./docs/mysql:/opt/el2ck-schema:ro
+    healthcheck:
+      # TCP excludes the temporary socket-only initialization server.
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_PASSWORD\" mysql --protocol=TCP -h127.0.0.1 -uel2ck eltock -Nse 'SELECT ready FROM el_bundle_bootstrap WHERE id=1' | grep -qx 1"]
+      interval: 5s
+      timeout: 5s
+      start_period: 90s
+      retries: 36
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.3.14.14
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: el2ck_admin
+      CLICKHOUSE_PASSWORD: ${BUNDLED_CK_PASSWORD:?Package standalone credentials first}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - standalone-ck-data:/var/lib/clickhouse
+      - standalone-ck-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --host 127.0.0.1 --user \"$$CLICKHOUSE_USER\" --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1' | grep -qx 1"]
+      interval: 5s
+      timeout: 5s
+      start_period: 30s
+      retries: 36
+volumes:
+  standalone-app-data:
+  standalone-mysql-data:
+  standalone-ck-data:
+  standalone-ck-logs:

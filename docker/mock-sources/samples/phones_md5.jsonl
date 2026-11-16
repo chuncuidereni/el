@@ -1,0 +1,5 @@
+{"event_id":1,"user_id":101,"event":"page_view","page":"home","phone_md5":"4d009f30087e9aa9f5b5806d5f350017"}
+{"event_id":2,"user_id":102,"event":"page_view","page":"products","phone_md5":"cd96e7ce247ed5c74267805b69cc7cd3"}
+{"event_id":3,"user_id":101,"event":"add_to_cart","page":"products","phone_md5":"4d009f30087e9aa9f5b5806d5f350017"}
+{"event_id":4,"user_id":103,"event":"page_view","page":"home","phone_md5":"e910662da706109978313531f1c72320"}
+{"event_id":5,"user_id":101,"event":"purchase","page":"checkout","phone_md5":"4d009f30087e9aa9f5b5806d5f350017"}

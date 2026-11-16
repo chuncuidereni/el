@@ -1,0 +1,51 @@
+# Critical metadata columns for identity, ownership, checkpoints and progress.
+# Format: table.column=data_type|IS_NULLABLE|character_maximum_length
+# A trailing "|" means character length is not constrained (for example INT or LONGTEXT).
+# Existing identity/ownership columns used by row locks and physical-target uniqueness.
+el_connections.id=bigint|NO|
+el_connections.ck_instance_id=bigint|YES|
+el_data_sources.id=bigint|NO|
+el_sync_tasks.id=bigint|NO|
+el_sync_tasks.data_source_id=bigint|NO|
+el_sync_tasks.connection_id=bigint|NO|
+el_sync_runs.id=bigint|NO|
+el_sync_runs.task_id=bigint|NO|
+el_wf_tasks.id=bigint|NO|
+el_resource_owners.resource_type=varchar|NO|
+el_resource_owners.resource_id=bigint|NO|
+el_resource_owners.owner_user_id=bigint|NO|
+el_data_assets.id=bigint|NO|
+el_data_assets.backend_id=bigint|NO|
+el_data_assets.ck_instance_id=bigint|YES|
+el_data_assets.owner_user_id=bigint|NO|
+el_data_assets.database_name=varchar|NO|
+el_data_assets.table_name=varchar|NO|
+
+el_sync_tasks.timeout_minutes=int|NO|
+el_sync_tasks.resumable=tinyint|NO|
+el_sync_tasks.stable_key=varchar|NO|255
+el_sync_tasks.batch_size=int|NO|
+
+el_sync_runs.resumed=tinyint|NO|
+el_sync_runs.checkpoint_from=varchar|NO|255
+el_sync_runs.checkpoint_rows=bigint|NO|
+el_sync_runs.progress_json=longtext|YES|
+el_sync_runs.deleted_at=datetime|YES|
+
+el_sync_checkpoints.task_id=bigint|NO|
+el_sync_checkpoints.state_json=longtext|NO|
+el_sync_checkpoints.updated_at=datetime|NO|
+
+el_arb_checkpoints.workflow_id=bigint|NO|
+el_arb_checkpoints.state_json=longtext|NO|
+el_arb_checkpoints.updated_at=datetime|NO|
+
+el_arb_workflow_runs.progress=text|YES|
+
+el_datasource_observations.owner_user_id=bigint|NO|
+el_datasource_observations.datasource_id=bigint|NO|
+el_datasource_observations.config_token=varchar|NO|64
+el_datasource_observations.observation_started_at=bigint|NO|
+el_datasource_observations.checked_at=bigint|NO|
+el_datasource_observations.state=varchar|NO|16
+el_datasource_observations.observation_source=varchar|NO|32

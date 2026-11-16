@@ -1,0 +1,43 @@
+# Maven / Java
+target/
+backup-*/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+release/
+
+# 运行时数据目录(SQLite / DuckDB / uploads)
+data/
+.runtime-check/
+
+# Python / TypeScript 可再生缓存
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
+
+# Node / 前端构建产物
+web/node_modules/
+web/dist/
+node_modules/
+dist/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local configuration(仅根目录的外部配置,不能误伤 src/.../config 包)
+/config/
+
+# Local secrets
+.env
+.env.*
+
+!.env.example

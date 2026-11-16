@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 【文件职责】维护 ClickHouse 连接元数据、身份绑定和连接配置的 MyBatis SQL 映射。
+     修改语句时需同步检查参数名、结果映射、列名、排序和事务语义；SQL 内容本身不应由注释改动。 -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  ClickHouse 目标源连接表(el_connections)的 MyBatis 映射。namespace 对应
+  com.el2ck.mapper.connection.ConnectionMapper,每个语句的 id 对应该接口的方法名:
+  references / configuredReferences / list / getById / getByName / insert / update /
+  deleteById / setDefault。
+
+  ⚠️ 本文件里的 SQL 有两条不能按字面理解的约定(由 repository/metadata/MetadataSqlDialect.mysql()
+     在驱动边界统一改写,编辑本文件时必须遵守,否则会在运行期报表不存在或语法错误):
+       1) 表名写「逻辑名」:这里写 connections,实际执行时被改写为 el_connections。
+          不要在 SQL 里自己写 el_ 前缀,也不要新增未在 MetadataSqlDialect.TABLES 登记的表;
+       2) 时间函数沿用一个旧写法 datetime('now'),执行前会被改写为 UTC_TIMESTAMP()
+          (库内时间统一按 UTC 存取,见 MysqlMetadataDataSource 的 time_zone 设置)。
+
+  补充:references / configuredReferences 里的 `||` 是 SQLite 的字符串拼接 —— MySQL 默认把 `||`
+  当逻辑或,靠连接池初始化时注入的 PIPES_AS_CONCAT 才成立(见 MysqlMetadataDataSource.open 的
+  connectionInitSql);这不是本文件能保证的,改动连接池初始化前先确认这一点。
+-->
+<mapper namespace="com.el2ck.mapper.connection.ConnectionMapper">
+
+    <!--
+      公共列清单:list / getById / getByName 三个 SELECT 共用的字段集,避免重复维护列名。
+      AS "default" 不是装饰:实体 Connection 的字段是布尔 isDefault,Lombok 生成的 setter 是
+      setDefault(),MyBatis 解析出的属性名因此是 default —— 必须把 is_default 显式别名成 default,
+      否则该属性恒为 false。写库一侧同样要用 #{default}(见 insert / update)。
+      `database` 列是 MySQL 保留字,方言会自动加反引号,不要在 XML 里自己加(加了也不报错,但没必要)。
+    -->
+    <sql id="BaseColumns">
+        id, name, host, port, protocol, database, username, password_enc, secure, description, is_default AS "default" ,
+        created_at, updated_at, dial_timeout_ms, query_timeout_ms, conn_max_lifetime_min, read_only,
+        params_json
+    </sql>
+
+    <!--
+      结构化引用检查的「第一半」:把仍引用该连接的行拼成给人看的标签(类型 #id「name」)。
+      覆盖 arb_workflows / db_groups / tbl_groups 三张有 connection_id 外键语义的表。
+      ⚠️ 它**只覆盖这三张** —— 同步任务的引用由 MetadataRepository.deleteConnection 在 Java 层
+      另行扫描,而工作流/宽表任务/已保存查询里埋在 JSON 中的 connectionId 由 configuredReferences
+      负责。删除连接的引用保护是这三路结果的并集,少任何一路都会漏判。
+      返回值只用于拼错误消息(命中行即说明存在引用);查询本身无副作用。
+    -->
+    <select id="references" resultType="java.lang.String">
+        SELECT '仲裁工作流 #' || id || '「' || name || '」'
+        FROM arb_workflows
+        WHERE connection_id= #{id}
+        UNION ALL SELECT '数据库分组 #' || id || '「' || name || '」'
+        FROM db_groups
+        WHERE connection_id= #{id}
+        UNION ALL SELECT '表分组 #' || id || '「' || name || '」'
+        FROM tbl_groups
+        WHERE connection_id= #{id}
+    </select>
+
+    <!--
+      结构化引用检查的「第二半」:把三类「配置以 JSON 存整段 payload」的行整表捞出来(label + payload),
+      交给调用方在 Java 里递归解析,找出 JSON 里引用了某个 connectionId 的配置(collectJsonReference)。
+      它按设计**不接参数、不按连接过滤** —— 因为引用藏在 payload 的任意层级,SQL 无法筛选;
+      代价是每次删连接都要把所有工作流/宽表任务/已保存查询的整份配置读进内存,数据量大时要注意。
+      resultType 是 Map,UNION ALL 的列名取自第一个 SELECT,所以后面两支不重复起别名。
+      末支只取 visual_config != '' 的行:没有可视化配置的已保存查询没有可被引用的载荷;
+      注意 MySQL 里 NULL != '' 求值为 NULL,visual_config 为 NULL 的行同样被排除(与 SQLite 语义一致)。
+    -->
+    <select id="configuredReferences" resultType="java.util.Map">
+        SELECT '查询工作流 #' || id || '「' || name || '」' AS label, config_json AS payload
+        FROM query_workflows
+        UNION ALL SELECT '宽表任务 #' || id || '「' || name || '」' , config_json
+        FROM wide_table_tasks
+        UNION ALL SELECT '已保存查询 #' || id || '「' || name || '」' , visual_config
+        FROM sql_queries
+        WHERE visual_config != ''
+    </select>
+
+    <!--
+      全部连接。默认连接(is_default=1)排在最前,同组内按 id 升序(即创建顺序);
+      前端连接下拉框依赖这个顺序,不要改成单纯按 id 或 name 排序。
+    -->
+    <select id="list" resultType="com.el2ck.entity.connection.Connection">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM connections
+        ORDER BY is_default DESC, id ASC
+    </select>
+
+    <!-- 按主键取单个连接;查不到返回 null(调用方自行判定 404)。 -->
+    <select id="getById" resultType="com.el2ck.entity.connection.Connection">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM connections
+        WHERE id = #{id}
+    </select>
+
+    <!-- 按连接名取单个连接;name 列有 UNIQUE 约束,故最多命中一行,查不到返回 null。 -->
+    <select id="getByName" resultType="com.el2ck.entity.connection.Connection">
+        SELECT
+        <include refid="BaseColumns"/>
+        FROM connections
+        WHERE name = #{name}
+    </select>
+
+    <!--
+      新增连接。useGeneratedKeys + keyProperty 把自增主键回填到入参 Connection.id 上,
+      MetadataRepository.createConnection 依赖回填后的 id 直接返回。
+      ⚠️ 高级配置五列(dial_timeout_ms / query_timeout_ms / conn_max_lifetime_min / read_only /
+         params_json)显式带 jdbcType,不能省:这些列 NULLABLE 且实体里是包装类型,
+         为 null 时 MyBatis 必须知道 jdbcType 才能落成 NULL;而 NULL 在这里是有语义的 ——
+         表示「继承全局默认」(见 AppSettings),所以**不能**改成 IFNULL 之类的兜底默认值。
+      created_at / updated_at 不在本语句里,由建表默认 CURRENT_TIMESTAMP 补齐。
+      is_default 用的是 #{default},理由见 BaseColumns 的别名说明。
+    -->
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO connections (name, host, port, protocol, database, username, password_enc, secure, description,
+        is_default, dial_timeout_ms, query_timeout_ms, conn_max_lifetime_min, read_only, params_json)
+        VALUES ( #{name} , #{host} , #{port} , IFNULL( #{protocol} , 'native' ) , #{database} , #{username} , #{passwordEnc} , #{secure} ,
+        #{description} , #{default} , #{dialTimeoutMs,jdbcType=BIGINT} , #{queryTimeoutMs,jdbcType=BIGINT} ,
+        #{connMaxLifetimeMin,jdbcType=BIGINT} , #{readOnly,jdbcType=INTEGER} , #{paramsJson} )
+    </insert>
+
+    <!--
+      整体覆盖一个连接的全部可编辑字段。⚠️ password_enc 在这里一并回写:服务层未改密码时会
+      把读出的原密文原样带回来,若上层构造实体时漏填该字段,会把密码清成空串。
+      created_at 不更新(它是创建时间);updated_at 用库侧 datetime('now'),不依赖应用机器时钟。
+      高级配置列的 jdbcType 与「NULL 表示继承全局默认」的约定同 insert,理由见上。
+      is_default 也在这里被写回,但「设为默认」有专门的 setDefault 语句 —— 日常改连接请勿顺手
+      改动 is_default,否则会出现多个默认连接(本列没有唯一约束兜底)。
+    -->
+    <update id="update">
+        UPDATE connections
+        SET name= #{name} , host= #{host} , port= #{port} , protocol= IFNULL( #{protocol} , 'native' ) , database= #{database} , username= #{username} ,
+        password_enc= #{passwordEnc} , secure= #{secure} , description= #{description} , is_default= #{default} ,
+        dial_timeout_ms= #{dialTimeoutMs,jdbcType=BIGINT} , query_timeout_ms= #{queryTimeoutMs,jdbcType=BIGINT} ,
+        conn_max_lifetime_min= #{connMaxLifetimeMin,jdbcType=BIGINT} , read_only= #{readOnly,jdbcType=INTEGER} ,
+        params_json= #{paramsJson} , updated_at=datetime( 'now' )
+        WHERE id= #{id}
+    </update>
+
+    <!--
+      删除连接行。⚠️ 级联与保护都不在本语句里,而在 repository 层:
+      MetadataRepository.deleteConnection 先做引用保护(requireUnreferenced,检查三路引用),
+      再调 remarks.deleteByConn 手动清掉该连接下的全部用户备注,最后才调本方法删连接
+      (表间无外键,所以清理是手写的,见 UserRemarkMapper.deleteByConn)。
+      也就是说单独调用本 Mapper 方法会同时绕过引用保护、并留下 user_remarks 孤儿行,请走 repository。
+    -->
+    <delete id="deleteById">
+        DELETE
+        FROM connections
+        WHERE id = #{id}
+    </delete>
+
+    <!--
+      把一条连接设为默认,同时原子地清掉其余所有连接的默认位(一条 UPDATE 完成,避免先清后设
+      之间出现「零默认」的中间态)。
+      ⚠️ 本语句**没有 WHERE**:传入的 id 若不存在,CASE 全部落到 ELSE 0,结果是所有连接的
+      is_default 都被清成 0,平台将没有默认连接。调用前必须先确认 id 存在
+      (MetadataRepository.setDefaultConnection 的调用方负责这一点,请勿直接调 Mapper)。
+      无其他副作用;受影响行数等于表内全部连接数,不能用来判断 id 是否存在。
+    -->
+    <update id="setDefault">
+        UPDATE connections
+        SET is_default = CASE WHEN id = #{id} THEN 1 ELSE 0 END
+    </update>
+</mapper>

@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 【文件职责】维护用户备注内容的 MyBatis SQL 映射。
+     修改语句时需同步检查参数名、结果映射、列名、排序和事务语义；SQL 内容本身不应由注释改动。 -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  用户备注表(el_user_remarks)的 MyBatis 映射。namespace 对应
+  com.el2ck.mapper.user.UserRemarkMapper,每个语句的 id 对应该接口的方法名:
+  listByConn / upsert / delete / deleteByConn。
+
+  ⚠️ 本文件里的 SQL 有两条不能按字面理解的约定(由 repository/metadata/MetadataSqlDialect.mysql()
+     在驱动边界统一改写,编辑本文件时必须遵守,否则会在运行期报表不存在或语法错误):
+       1) 表名写「逻辑名」:这里写 user_remarks,实际执行时被改写为 el_user_remarks。
+          不要在 SQL 里自己写 el_ 前缀,也不要新增未在 MetadataSqlDialect.TABLES 登记的表;
+       2) 时间函数沿用一个旧写法 datetime('now'),执行前会被改写为 UTC_TIMESTAMP()
+          (库内时间统一按 UTC 存取,见 MysqlMetadataDataSource 的 time_zone 设置)。
+          (本文件当前没有用到时间函数的语句,但约定对新增语句同样成立。)
+
+  语义提醒:表以 (conn_id, user_name) 为复合主键,user_name 指的是 **ClickHouse 用户**
+  (表/用户浏览时为 CH 用户加的说明),与平台登录账号 el_app_users 无关 —— 两者同名也互不影响。
+-->
+<mapper namespace="com.el2ck.mapper.user.UserRemarkMapper">
+
+    <!--
+      取某连接下的全部备注,供 MetadataRepository#getUserRemarks 组装成 用户名→备注 的 Map。
+      resultType 是 Map,列名即 Map 的 key,调用方按 "user_name" / "remark" 取值。
+      无 ORDER BY:顺序不保证;调用方用 LinkedHashMap 接收,但也只是保留本语句返回的次序,
+      不要依赖「按用户名字典序」之类的隐含假设。只读,无副作用。
+    -->
+    <select id="listByConn" resultType="java.util.Map">
+        SELECT user_name, remark
+        FROM user_remarks
+        WHERE conn_id = #{connId}
+    </select>
+
+    <!--
+      写入或覆盖一条备注(侧作用:该 (conn_id, user_name) 已有备注时旧值被直接丢弃)。
+      ON CONFLICT(conn_id, user_name) DO UPDATE SET remark = excluded.remark 是 SQLite 写法,
+      执行前被方言改写为 MySQL 的 ON DUPLICATE KEY UPDATE remark = VALUES(remark);
+      冲突判定依据是 el_user_remarks 的复合主键 PRIMARY KEY(conn_id, user_name),
+      也就是说「冲突」= 同一连接下同一 CH 用户。
+      ⚠️ remark 列 NOT NULL,传入 null 会报错;归一化在 repository 层做
+      (MetadataRepository.setUserRemark 把 null 折成空串),本层不做兜底。
+    -->
+    <insert id="upsert">
+        INSERT INTO user_remarks (conn_id, user_name, remark)
+        VALUES ( #{connId} , #{userName} , #{remark} )
+        ON CONFLICT(conn_id, user_name) DO UPDATE
+        SET remark = excluded.remark
+    </insert>
+
+    <!--
+      按复合主键删掉一条备注(MetadataRepository.deleteUserRemark)。无级联、无副作用;
+      删不存在的行不报错,受影响行数为 0(上层不看返回值)。
+    -->
+    <delete id="delete">
+        DELETE
+        FROM user_remarks
+        WHERE conn_id = #{connId} AND user_name = #{userName}
+    </delete>
+
+    <!--
+      删掉某连接下的全部备注。⚠️ 这是「删除连接」时的手写级联清理,而且级联并不由数据库保证:
+      表间没有外键,只有 MetadataRepository.deleteConnection 这条路径会在删除连接前显式调用本方法
+      (先 remarks.deleteByConn 再 conns.deleteById)。因此若绕过 repository 直接删连接,
+      本表的行会残留成按 conn_id 的孤儿数据,不会被任何机制回收。
+      无参数校验:传入的 connId 不存在时静默删 0 行。
+    -->
+    <delete id="deleteByConn">
+        DELETE
+        FROM user_remarks
+        WHERE conn_id = #{connId}
+    </delete>
+</mapper>

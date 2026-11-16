@@ -1,0 +1,12 @@
+CREATE DATABASE IF NOT EXISTS demo;
+CREATE TABLE IF NOT EXISTS demo.orders (
+  order_id BIGINT,
+  user_id BIGINT,
+  amount DECIMAL(12,2),
+  status STRING
+)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+TBLPROPERTIES ('skip.header.line.count'='1');
+LOAD DATA LOCAL INPATH '/samples/orders.csv' OVERWRITE INTO TABLE demo.orders;
+SELECT * FROM demo.orders LIMIT 10;

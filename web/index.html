@@ -1,0 +1,40 @@
+<!doctype html>
+<!-- 语言标记为中文,影响字体回退与浏览器表单/断行等本地化行为 -->
+<html lang="zh-CN">
+  <head>
+    <!-- 必须在最前声明编码,避免中文标题乱码 -->
+    <meta charset="UTF-8" />
+    <!-- 站点图标:public/favicon.svg 由 Vite 原样拷贝到 dist 根,故用绝对路径引用;
+         带 ?v= 版本参数用于击穿浏览器对 favicon 的强缓存(改图后只需提升版本号) -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=8" />
+    <!-- 移动端/平板的视口设置;桌面端 Web 应用同样保留以免缩放异常 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>数据同步平台</title>
+    <script>
+      // 首帧前应用主题,避免亮暗闪变。默认暗色。
+      // 用内联脚本(而非打包代码)是为了在 CSS/JS 加载前就挂上 html.dark,防止白屏闪烁
+      (function () {
+        var t = null;
+        try { t = localStorage.getItem('el2ck.theme') } catch (e) {}
+        // 只有显式存了 'light' 才用亮色,其余情况(未设置/隐私模式)一律暗色
+        if (t !== 'light') document.documentElement.classList.add('dark')
+      })()
+    </script>
+    <!-- 提前与 Google Fonts 建连(DNS+TCP+TLS),缩短后续字体请求耗时。
+         第二条指向 gstatic 字体文件域,跨域需带 crossorigin -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- 引入 UI 字体 Manrope 与等宽字体 JetBrains Mono(字体族定义见 src/assets/theme.css 的 font-ui / font-mono 变量);
+         display=swap 先渲染回退字体,避免文字长时间不可见 -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <!-- Vue 应用挂载点:src/main.ts 中 createApp(...).mount('#app') 使用 -->
+    <div id="app"></div>
+    <!-- 前端入口(Vite 以 module 方式加载 TS) -->
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

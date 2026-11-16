@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS el_arb_checkpoints (
+    workflow_id BIGINT NOT NULL PRIMARY KEY,
+    state_json LONGTEXT NOT NULL,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='工作流回填与摊平断点';

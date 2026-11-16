@@ -1,0 +1,106 @@
+# 镜像专用配置：连接地址和凭据只从部署环境注入。
+app:
+  data-dir: /app/data
+  web-dir: /app/web/dist
+  metadata:
+    url: ${APP_METADATA_URL}
+    username: ${APP_METADATA_USERNAME}
+    password: ${APP_METADATA_PASSWORD}
+  secret-key: ${APP_SECRETKEY}
+  user: ${APP_USER:admin}
+  password: ${APP_PASSWORD:}
+  arb-flatten-interval-ms: 60000
+  # 工作流回填/摊平共用断点：每批去重键数、单条语句超时和重试上限。
+  # 这些值必须与主配置保持一致；缺失时虽可依赖代码默认值，但会造成容器与本地行为漂移。
+  arb-resume:
+    batch-keys: ${APP_ARB_RESUME_BATCH_KEYS:100000}
+    statement-timeout-seconds: ${APP_ARB_RESUME_STATEMENT_TIMEOUT_SECONDS:1800}
+    max-retries: ${APP_ARB_RESUME_MAX_RETRIES:5}
+  ck-management:
+    username: ${CK_MANAGEMENT_USERNAME:}
+    password: ${CK_MANAGEMENT_PASSWORD:}
+    enabled: ${CK_MANAGEMENT_ENABLED:true}
+  ck-databases: ${CK_DATABASES:ods_data,dwd_data}
+  # 同步入库前的 mdn 明文校验:源行数 ≤ 阈值时全量检查,超过阈值时等距抽样;任一非法即中止本次同步。
+  sync-mdn-check:
+    enabled: ${SYNC_MDN_CHECK_ENABLED:true}
+    full-scan-max-rows: ${SYNC_MDN_CHECK_FULL_SCAN_MAX_ROWS:100000}
+    sample-size: ${SYNC_MDN_CHECK_SAMPLE_SIZE:10000}
+  default-ck:
+    host: ${APP_DEFAULTCK_HOST}
+    protocol: ${APP_DEFAULTCK_PROTOCOL:native}
+    # protocol 和 port 是一组配置，不能只改其中一个：
+    # native + 9000（直连）、native + 9001（代理转发到 9000）、
+    # http + 8123（直连）、http + 8132（代理转发到 8123）。
+    port: ${APP_DEFAULTCK_PORT:9000}
+    database: ${APP_DEFAULTCK_DATABASE:default}
+    username: ${APP_DEFAULTCK_USERNAME:default}
+    password: ${APP_DEFAULTCK_PASSWORD:}
+    secure: ${APP_DEFAULTCK_SECURE:false}
+
+spring:
+  # 应用不执行 MySQL DDL；独立模式空库由 MySQL 容器初始化，已有库按升级 SQL 维护。
+  sql:
+    init:
+      mode: never
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:test}
+  main:
+    banner-mode: "off"
+  servlet:
+    multipart:
+      max-file-size: 200MB
+      max-request-size: 210MB
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.mongo.MongoAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.mongo.MongoDataAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+  mvc:
+    throw-exception-if-no-handler-found: true
+  web:
+    resources:
+      add-mappings: false
+
+mybatis:
+  mapper-locations: classpath*:com/el2ck/mapper/**/*Mapper.xml
+  configuration:
+    map-underscore-to-camel-case: true
+    default-enum-type-handler: org.apache.ibatis.type.EnumOrdinalTypeHandler
+
+logging:
+  pattern:
+    # 保留线程名，便于区分同步、工作流和状态探测线程产生的日志。
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+  level:
+    com.el2ck: INFO
+  file:
+    name: /app/data/logs/el-to-ck.log
+  logback:
+    rollingpolicy:
+      max-file-size: 20MB
+      max-history: 7
+  charset:
+    file: UTF-8
+
+server:
+  address: 0.0.0.0
+  port: 17878
+  servlet:
+    session:
+      timeout: 30m
+      cookie:
+        # 会话 Cookie 不允许脚本读取；HTTPS 部署时通过 SESSION_COOKIE_SECURE=true 开启 Secure。
+        http-only: true
+        same-site: lax
+        secure: ${SESSION_COOKIE_SECURE:false}
+  error:
+    include-message: never
+    include-stacktrace: never
+    whitelabel:
+      enabled: false
+
+xxl:
+  job:
+    # 默认由应用内调度器执行；启用 XXL-JOB 时必须补齐与主配置一致的 executor 参数。
+    enabled: false

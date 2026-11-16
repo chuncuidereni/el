@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 【文件职责】维护同步断点、待确认目标区间和重试令牌的 MyBatis SQL 映射。
+     修改语句时需同步检查参数名、结果映射、列名、排序和事务语义；SQL 内容本身不应由注释改动。 -->
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  同步断点表(el_sync_checkpoints)的 MyBatis 映射。namespace 对应
+  com.el2ck.mapper.sync.SyncCheckpointMapper,语句 id 与接口方法同名。
+
+  ⚠️ 表名写「逻辑名」sync_checkpoints,执行时由 MetadataSqlDialect.mysql() 改写为
+     el_sync_checkpoints;该表必须在 MetadataSqlDialect.TABLES 里登记。
+     运行期间的断点读写见 com.el2ck.sync.SyncCheckpointStore；此处仅处理删除与已完成断点的配置切换。
+-->
+<mapper namespace="com.el2ck.mapper.sync.SyncCheckpointMapper">
+
+    <!-- 删除某任务的断点。任务删除时与运行历史、文件去重记录一并清理。 -->
+    <delete id="deleteByTask">
+        DELETE FROM sync_checkpoints
+        WHERE task_id = #{taskId}
+    </delete>
+    <!-- 只调整配置身份，不清空水位，不创建新轮次；失败由外层事务回滚任务配置。 -->
+    <update id="rebindCompleted">
+        UPDATE sync_checkpoints
+        SET state_json = JSON_SET(state_json, '$.fingerprint', #{nextFingerprint}), updated_at = UTC_TIMESTAMP()
+        WHERE task_id = #{taskId}
+          AND JSON_UNQUOTE(JSON_EXTRACT(state_json, '$.fingerprint')) = #{previousFingerprint}
+          AND JSON_UNQUOTE(JSON_EXTRACT(state_json, '$.token')) = #{previousToken}
+          AND JSON_UNQUOTE(JSON_EXTRACT(state_json, '$.readerMode')) = 'mysql-date-tables-v1'
+          AND JSON_UNQUOTE(JSON_EXTRACT(state_json, '$.complete')) = 'true'
+    </update>
+</mapper>

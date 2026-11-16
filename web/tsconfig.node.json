@@ -1,0 +1,16 @@
+// 构建工具脚本(vite.config.ts 等)专用配置。
+// 这些文件运行在 Node 环境,与应用源码(tsconfig.json 的 DOM 环境)区分开,避免类型互相污染。
+{
+  "compilerOptions": {
+    // 作为被引用的子项目,必须开启 composite 才能参与 project references 增量构建
+    "composite": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    // 允许 `import viteConfig from './vite.config'` 这类默认导入写法
+    "allowSyntheticDefaultImports": true,
+    // 引入 Node 内置模块的类型(process、node:url 等)
+    "types": ["node"]
+  },
+  // 仅覆盖根目录下的构建配置文件
+  "include": ["vite.config.ts"]
+}

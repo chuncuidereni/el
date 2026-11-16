@@ -1,0 +1,168 @@
+# =====================================================================
+# el-to-ck 数据同步平台 —— 主配置文件(Spring Boot)
+# 绑定关系:app.* 由 com.el2ck.config.AppConfig(@ConfigurationProperties(prefix="app"))读取;
+# xxl.job.* 由 config/SchedulingConfiguration 在启用了执行器时读取。
+# 注意:本文件随 jar 一起打包,属于「内置缺省值」;生产环境请用外部
+#      application.yml / 环境变量 / 启动参数覆盖,尤其 app.secret-key。
+# =====================================================================
+
+# ---------- 应用自有配置(app.*,由 AppConfig 绑定) ----------
+# 连接信息按 profile 切换:
+#   dev        -> 本机已有的 clickhouse + booktoskill-mysql
+#   test (默认) -> 212 元数据库 + 正式 ClickHouse
+# 生产/容器部署使用 docker/application.yml(环境变量注入),不读取这里的地址。
+app:
+  # 本地数据目录:上传文件、临时文件、xxl-job 日志等都落在这里。缺省 ./data
+  data-dir: ./data
+  # 下面的连接字段只作为环境变量兜底;dev/test profile 会覆盖它们。
+  metadata:
+    url: ${APP_METADATA_URL:}
+    username: ${APP_METADATA_USERNAME:}
+    password: ${APP_METADATA_PASSWORD:}
+    maximum-pool-size: 10
+  # 连接口令等敏感字段的对称加密密钥。开发用示例值,生产环境务必替换(改后旧密文无法解密)
+  secret-key: el2ck-dev-secret-please-change-in-prod
+  # 前端构建产物(vite build 输出)目录,由后端作为静态资源托管。缺省 ./web/dist
+  web-dir: ./web/dist
+  # 首次启动时播种的管理员用户名;留空则为 admin。已有用户时不会覆盖其密码。
+  user: ""
+  # 首次管理员密码;留空则随机生成并仅在首次启动控制台输出。
+  password: ""
+  # 多源仲裁工作流:服务表【自动摊平】的检查间隔(毫秒)。
+  # 设 0 或负数即关闭;可用环境变量 APP_ARB_FLATTEN_INTERVAL_MS 覆盖。
+  arb-flatten-interval-ms: 60000
+  # 工作流回填/摊平共用断点；按去重号码分段，单条语句超时不等于整轮超时。
+  arb-resume:
+    batch-keys: ${APP_ARB_RESUME_BATCH_KEYS:100000}
+    statement-timeout-seconds: ${APP_ARB_RESUME_STATEMENT_TIMEOUT_SECONDS:1800}
+    max-retries: ${APP_ARB_RESUME_MAX_RETRIES:5}
+  # 账号/授权管理专用 CK 身份。业务 SQL 绝不使用这份凭据。
+  # 必须拥有 ACCESS MANAGEMENT / CREATE USER / CREATE ROLE / GRANT OPTION 权限。
+  ck-management:
+    username: ${CK_MANAGEMENT_USERNAME:}
+    password: ${CK_MANAGEMENT_PASSWORD:}
+    enabled: ${CK_MANAGEMENT_ENABLED:true}
+  # 平台允许创建表/授权的业务库(逗号分隔)
+  ck-databases: ${CK_DATABASES:ods_data,dwd_data}
+  # 同步入库前拦截明文手机号，允许 MD5 等非明文值；源行数 ≤ 阈值时全检，超过阈值时抽样。
+  sync-mdn-check:
+    enabled: ${SYNC_MDN_CHECK_ENABLED:true}
+    full-scan-max-rows: ${SYNC_MDN_CHECK_FULL_SCAN_MAX_ROWS:100000}
+    sample-size: ${SYNC_MDN_CHECK_SAMPLE_SIZE:10000}
+  # 默认 ClickHouse 连接;dev/test profile 会补全地址与凭据。
+  default-ck:
+    name: ${CK_NAME:默认连接}
+    host: ${CK_HOST:}
+    protocol: ${CK_PROTOCOL:http}
+    port: ${CK_PORT:8123}
+    database: ${CK_DATABASE:ods_data}
+    username: ${CK_USERNAME:}
+    password: ${CK_PASSWORD:}
+    secure: ${CK_SECURE:false}
+    description: ${CK_DESCRIPTION:默认连接}
+
+# ---------- Spring Boot ----------
+spring:
+  sql:
+    init:
+      # MySQL 表结构由管理员在客户端手动维护，应用不执行 SQL 初始化脚本。
+      mode: never
+  profiles:
+    # 默认部署到 212；本地开发显式使用 --spring.profiles.active=dev
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+  main:
+    # 关闭启动时的 Spring ASCII banner,保持容器/CI 日志干净
+    banner-mode: off
+  servlet:
+    multipart:
+      # 单文件上传上限(Excel/CSV 数据源导入);请求体上限需略大于该值以容纳表单开销
+      max-file-size: 200MB
+      max-request-size: 210MB
+  autoconfigure:
+    exclude:
+      # 关闭 Spring Boot 自动装配:Mongo/JDBC 数据源均由本项目手工管理(见 config/InfrastructureConfiguration),
+      # 自动装配会因缺少这些依赖的默认配置而报错或产生多余连接
+      - org.springframework.boot.autoconfigure.mongo.MongoAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.mongo.MongoDataAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+  mvc:
+    # 找不到 handler 时抛异常,交由统一异常处理返回 JSON(而非默认白页)
+    throw-exception-if-no-handler-found: true
+  web:
+    resources:
+      # 关闭默认静态资源映射,前端资源由自定义配置按 app.web-dir 托管,避免与 SPA 路由冲突
+      add-mappings: false
+
+# ---------- MyBatis ----------
+mybatis:
+  mapper-locations: classpath*:com/el2ck/mapper/**/*Mapper.xml
+  configuration:
+    # 下划线列名自动映射到驼峰属性(如 create_time → createTime)
+    map-underscore-to-camel-case: true
+    # 枚举按 ordinal(序号)存库/取值,与早期数据保持一致
+    default-enum-type-handler: org.apache.ibatis.type.EnumOrdinalTypeHandler
+
+# ---------- 日志 ----------
+logging:
+  level:
+    # 本项目自身的日志(启动横幅、同步/工作流调度、异常栈)
+    com.el2ck: INFO
+    # ★ MyBatis:Mapper 接口所在包。置为 DEBUG 后每条语句都会打印三行:
+    #     ==>  Preparing: INSERT INTO datasource(...) VALUES (?,?,...)
+    #     ==> Parameters: 3(Long), 订单源(String), ...
+    #     <==    Updates: 1
+    #   Parameters 行会把占位符替换成实际取值(含中文),排查"条件没生效/写进去的值不对"时先看这里。
+    #   生产环境嫌吵就改回 INFO,或启动参数覆盖:--logging.level.com.el2ck.mapper=INFO
+    com.el2ck.mapper: DEBUG
+    # 宽表任务仓储(WideTableRepository)用的是原生 JdbcTemplate 而非 MyBatis,单独放开才有 SQL 可看
+    org.springframework.jdbc.core: DEBUG
+  pattern:
+    # 默认格式不带线程名;而同步/工作流/状态探测都跑在各自的线程池里,加上 [%thread] 才能分辨日志来自谁
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+  file:
+    # 同时落盘(相对进程工作目录,默认即 data-dir 同级),避免控制台关了日志就丢;
+    # 不需要时删掉这一段即可。滚动策略见下,单文件 20MB、最多保留 7 个历史文件
+    name: ./data/logs/el-to-ck.log
+  logback:
+    rollingpolicy:
+      max-file-size: 20MB
+      max-history: 7
+  charset:
+    # 日志文件固定 UTF-8:用编辑器/工具打开时不会因平台默认(中文 Windows 为 GBK)而乱码。
+    # 控制台刻意不设,保持平台默认 —— cmd 是 GBK 代码页,强制 UTF-8 反而会把中文打成乱码
+    file: UTF-8
+
+# ---------- HTTP 服务 ----------
+server:
+  servlet:
+    session:
+      timeout: 30m
+      cookie:
+        http-only: true
+        same-site: lax
+        secure: ${SESSION_COOKIE_SECURE:false}
+  # 监听全部网卡,便于局域网/容器内访问;若只允许本机可改为 127.0.0.1
+  address: 0.0.0.0
+  port: 17878
+  error:
+    # 错误响应不返回异常消息与堆栈,避免泄漏内部实现细节(前端只拿 HTTP 状态码)
+    include-message: never
+    include-stacktrace: never
+    whitelabel:
+      # 关闭默认错误白页,错误一律走 JSON 响应
+      enabled: false
+
+# ---------- XXL-JOB 执行器 ----------
+xxl:
+  job:
+    # 默认关闭:关闭时由服务内 ScheduledSyncRunner 按任务 Cron 自行调度;
+    # 置为 true 后调度权交给 XXL-JOB Admin,本机仅作为执行器注册
+    enabled: false
+    admin-addresses: http://127.0.0.1:17878/xxl-job-admin
+    executor:
+      # 执行器注册名(需与 Admin 中「执行器管理」的 AppName 一致)
+      appname: el-to-ck
+      # 执行器监听端口,须与 Admin 侧配置一致,且不可与 server.port 冲突
+      port: 9999
+      # 执行日志落盘目录(位于 data-dir 下)
+      log-path: ./data/xxl-job

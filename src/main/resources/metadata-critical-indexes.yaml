@@ -1,0 +1,21 @@
+# Read-only contract for existing keys required by transactions, ownership and checkpoints.
+# Format: table.logical_label=unique|column1,column2 OR index|leading_column1,leading_column2
+# Names are descriptive labels, not physical index names. No DDL is executed by the application.
+el_connections.identity=unique|id
+el_data_sources.identity=unique|id
+el_sync_tasks.identity=unique|id
+el_sync_runs.identity=unique|id
+el_sync_runs.task_history=index|task_id,id
+el_sync_runs.visible_history=index|task_id,deleted_at,id
+el_wf_tasks.identity=unique|id
+el_resource_owners.identity=unique|resource_type,resource_id
+el_resource_grants.identity=unique|resource_type,resource_id,grantee_user_id
+el_data_assets.identity=unique|id
+el_data_assets.connection_location=unique|backend_type,backend_id,database_name,table_name
+el_data_assets.instance_location=unique|ck_instance_id,database_name,table_name
+el_ck_instances.instance_key=unique|instance_key
+el_user_ck_bindings.owner_instance=unique|user_id,ck_instance_id
+el_user_ck_bindings.instance_username=unique|ck_instance_id,ck_username
+el_ck_access_operations.operation_key=unique|operation_key
+el_sync_checkpoints.task=unique|task_id
+el_arb_checkpoints.workflow=unique|workflow_id
