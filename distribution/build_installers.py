@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -95,6 +96,8 @@ def prepare(system, arch, cache):
         if len(candidates) != 1:
             raise RuntimeError("Official WSL release has no unique x64 MSI")
         asset = candidates[0]
+        if not re.fullmatch(r"wsl\.\d+(?:\.\d+){1,3}\.x64\.msi", asset["name"]):
+            raise RuntimeError("Unexpected WSL installer filename")
         if not asset["browser_download_url"].startswith("https://github.com/microsoft/WSL/releases/download/"):
             raise RuntimeError("Unexpected WSL download source")
         specs["wsl"] = (asset["name"], asset["browser_download_url"], "Microsoft Corporation")
@@ -108,6 +111,8 @@ def prepare(system, arch, cache):
         version = ""
         if system == "windows":
             version = verify_windows_signature(path, publisher)
+            if role == "wsl" and not version:
+                version = release["tag_name"]
         else:
             # Assess the vendor-signed app without running its installer.
             with tempfile.TemporaryDirectory(prefix="el-docker-signature-") as mount:

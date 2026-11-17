@@ -72,9 +72,18 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
-          import os, subprocess, zipfile
+          import json, os, subprocess, zipfile
           archive = next(Path('release/public').glob('*.zip'))
           with zipfile.ZipFile(archive) as bundle:
+              if '${{ matrix.os }}' != 'linux':
+                  root = archive.stem + '/'
+                  installers = json.loads(bundle.read(root + 'installers/manifest.json'))
+                  required = {'docker', 'wsl'} if '${{ matrix.os }}' == 'windows' else {'docker'}
+                  assert set(installers) == required, 'Bundled installers are missing'
+                  for installer in installers.values():
+                      assert installer['system'] == '${{ matrix.os }}'
+                      assert installer['architecture'] == '${{ matrix.arch }}'
+                      assert bundle.getinfo(root + installer['path']).file_size > 0
               bundle.extractall('release/smoke')
           binary = next(Path('release/smoke').glob('*/el-launcher' + ('.exe' if os.name == 'nt' else '')))
           binary.chmod(0o755)
