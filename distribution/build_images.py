@@ -75,7 +75,10 @@ def main():
         details = json.loads(subprocess.check_output(["docker", "image", "inspect", tag]))[0]
         if details["Os"] != "linux" or details["Architecture"] != args.arch:
             raise RuntimeError("Wrong architecture for " + tag + "; pull the requested platform explicitly")
-        images[role] = {"tag": tag, "id": details["Id"]}
+        # Layer digests are content-addressed and survive both classic and
+        # containerd image stores; config/manifest IDs are not portable.
+        layers = list((details.get("RootFS") or {}).get("Layers") or [])
+        images[role] = {"tag": tag, "id": details["Id"], "layers": layers}
     # Stream compression: never materialize both a multi-GB tar and gzip file.
     image_file = args.output / "images.tar.gz"
     process = subprocess.Popen(["docker", "save", *tags.values()], stdout=subprocess.PIPE)

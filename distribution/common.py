@@ -182,6 +182,10 @@ def verify_bundle(root):
     for role, item in runtime["images"].items():
         if any(not re.fullmatch(r"sha256:[a-f0-9]{64}", item.get(key, "")) for key in ("id", "config_id")):
             raise RuntimeError("Invalid image identity: " + role)
+        layers = item.get("layers")
+        if layers is not None and (not isinstance(layers, list) or any(
+                not isinstance(layer, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", layer) for layer in layers)):
+            raise RuntimeError("Invalid image layers: " + role)
     return runtime
 
 

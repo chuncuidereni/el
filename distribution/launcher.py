@@ -105,12 +105,26 @@ def show_login(state, directory):
 
 def resolve_image(prefix, env, item, architecture):
     identities = {item["id"], item["config_id"]}
+    expected_layers = item.get("layers") or []
     for reference in dict.fromkeys((item["id"], item["config_id"], item["tag"])):
-        result = run(prefix + ["image", "inspect", reference, "--format", "{{.Id}}|{{.Os}}|{{.Architecture}}"], capture=True,
-                     check=False, timeout=30, env=env)
+        result = run(prefix + ["image", "inspect", reference,
+                               "--format", "{{.Id}}|{{.Os}}|{{.Architecture}}|{{json .RootFS.Layers}}"],
+                     capture=True, check=False, timeout=30, env=env)
         parts = result.stdout.strip().split("|")
-        if result.returncode == 0 and len(parts) == 3 and parts[0] in identities and parts[1:] == ["linux", architecture]:
+        if result.returncode != 0 or len(parts) != 4 or parts[1:3] != ["linux", architecture]:
+            continue
+        if parts[0] in identities:
             return parts[0]
+        if expected_layers:
+            try:
+                actual_layers = json.loads(parts[3])
+            except ValueError:
+                continue
+            # containerd stores report the manifest digest as .Id, while the
+            # payload records the build host's image/config digest. Matching the
+            # content-addressed layer list proves the imported image is ours.
+            if actual_layers == expected_layers:
+                return parts[0]
     return None
 
 
