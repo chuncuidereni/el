@@ -61,6 +61,9 @@ public class SyncCheckpointStore {
         /** 实例 UUID + 库表名的锁；targetLock 保留旧值以兼容原断点和旧地址锁。 */
         @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
         public String physicalTargetLock;
+        /** 跨 serverUUID 能力版本的库/表名称锁；存入既有 JSON，不增加 MySQL 表字段。 */
+        @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+        public String compatibilityTargetLock;
         /** 完整 CREATE 定义的摘要，补足元数据修改时间精度不足的校验缺口。 */
         @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
         public String targetDefinitionHash;
@@ -169,34 +172,48 @@ public class SyncCheckpointStore {
     /** 同时持有旧地址锁和物理名称锁，不改历史指纹；UUID 用于识别尚未升级的跨地址断点。 */
     public Session open(long taskId, String target, String fingerprint, boolean restart, String retryToken,
                         boolean incremental, String physicalTarget, String tableUuid) {
+        return open(taskId,target,fingerprint,restart,retryToken,incremental,physicalTarget,tableUuid,null);
+    }
+
+    /** 兼容锁与主物理锁同时持有，避免旧版 CK 升级或不同协议连接绕过同一目标的互斥。 */
+    public Session open(long taskId, String target, String fingerprint, boolean restart, String retryToken,
+                        boolean incremental, String physicalTarget, String tableUuid, String compatibilityTarget) {
         Connection connection = null;
         String lock = lockName(target);
         String physicalLock = physicalTarget == null ? null : lockName(physicalTarget);
+        String compatibilityLock = compatibilityTarget == null ? null : lockName(compatibilityTarget);
         try {
             connection = database.getConnection();
             if (!MysqlNamedLock.tryAcquire(connection, lock))
                 throw new IllegalStateException("该目标表正在同步，请等待当前任务结束");
             if (physicalLock != null && !physicalLock.equals(lock) && !MysqlNamedLock.tryAcquire(connection,physicalLock))
                 throw new IllegalStateException("该物理目标表正在被其他连接同步，请等待当前任务结束");
+            if (compatibilityLock != null && !compatibilityLock.equals(lock) && !compatibilityLock.equals(physicalLock)
+                    && !MysqlNamedLock.tryAcquire(connection,compatibilityLock))
+                throw new IllegalStateException("该物理目标表正在被其他连接同步，请等待当前任务结束");
             // 失败后连接锁会释放，但未确认的去重令牌仍必须保留。其他任务不能越过它写入同一表，
             // 否则有限的 ClickHouse 去重窗口可能被挤出。成功完成或删除任务后才解除此保留。
             try (PreparedStatement q = connection.prepareStatement("SELECT task_id FROM el_sync_checkpoints WHERE task_id<>? "
                     + "AND (JSON_UNQUOTE(JSON_EXTRACT(state_json,'$.targetLock'))=? "
                     + "OR JSON_UNQUOTE(JSON_EXTRACT(state_json,'$.physicalTargetLock'))=? "
+                    + "OR JSON_UNQUOTE(JSON_EXTRACT(state_json,'$.physicalTargetLock'))=? "
+                    + "OR JSON_UNQUOTE(JSON_EXTRACT(state_json,'$.compatibilityTargetLock'))=? "
                     + "OR JSON_UNQUOTE(JSON_EXTRACT(state_json,'$.targetIdentity')) LIKE ?) "
                     + "AND (JSON_UNQUOTE(JSON_EXTRACT(state_json,'$.writerMode'))='mysql-dedup-v1' "
                     + "OR COALESCE(JSON_LENGTH(JSON_EXTRACT(state_json,'$.pendingStopTokens')),0)>0) "
                     + "AND JSON_UNQUOTE(JSON_EXTRACT(state_json,'$.complete'))='false' LIMIT 1")) {
                 q.setLong(1,taskId); q.setString(2,lock);
                 q.setString(3,physicalLock);
+                q.setString(4,compatibilityLock);
+                q.setString(5,compatibilityLock);
                 // 旧断点没有物理锁字段，但写入前已经记录目标 UUID。UUID 不含 LIKE 通配符。
-                q.setString(4,tableUuid == null ? null : "[MergeTree, " + tableUuid + ", %");
+                q.setString(6,tableUuid == null ? null : "[MergeTree, " + tableUuid + ", %");
                 q.setQueryTimeout(5);
                 try(ResultSet r=q.executeQuery()) {
                     if(r.next()) throw new IllegalStateException("目标表有未完成的同步任务 " + r.getLong(1) + "，请先继续或处理该任务");
                 }
             }
-            Session session = new Session(connection, lock, physicalLock, taskId);
+            Session session = new Session(connection, lock, physicalLock, compatibilityLock, taskId);
             try (PreparedStatement q = connection.prepareStatement("SELECT state_json FROM el_sync_checkpoints WHERE task_id=?")) {
                 q.setLong(1, taskId);
                 try (ResultSet r = q.executeQuery()) {
@@ -206,9 +223,10 @@ public class SyncCheckpointStore {
             State old = session.state;
             session.previousState=old;
             if(old!=null) {
-                if (!old.complete && !restart && old.physicalTargetLock!=null
-                        && !old.physicalTargetLock.equals(physicalLock))
-                    throw new IllegalStateException("目标连接的物理实例已变化，已保留原断点，请恢复原目标连接");
+                if (!old.complete && !restart && ((old.physicalTargetLock!=null
+                        && !matchesPhysicalLock(old.physicalTargetLock,physicalLock,compatibilityLock))
+                        || (old.compatibilityTargetLock!=null && !old.compatibilityTargetLock.equals(compatibilityLock))))
+                    throw new IllegalStateException("目标实例或数据库身份已变化，已保留原断点，请恢复原目标连接");
                 if(old.pendingStopTokens==null) old.pendingStopTokens=new java.util.ArrayList<>();
                 for(String token:old.pendingStopTokens) requireWriteToken(token);
             }
@@ -225,7 +243,8 @@ public class SyncCheckpointStore {
                 // 不足以识别同主机不同端口，必须同时用原配置指纹确认连接和结构未变。
                 if(old!=null && (previousPending || !old.pendingStopTokens.isEmpty())
                         && (!fingerprint.equals(old.fingerprint) || (old.targetLock!=null && !lock.equals(old.targetLock))
-                        || (old.physicalTargetLock!=null && !old.physicalTargetLock.equals(physicalLock))))
+                        || (old.physicalTargetLock!=null && !matchesPhysicalLock(old.physicalTargetLock,physicalLock,compatibilityLock))
+                        || (old.compatibilityTargetLock!=null && !old.compatibilityTargetLock.equals(compatibilityLock))))
                     throw new IllegalStateException("旧写入尚未确认停止，请恢复原任务及连接配置继续传输，确认停止后再修改配置");
                 session.state = new State();
                 session.state.fingerprint = fingerprint;
@@ -252,12 +271,17 @@ public class SyncCheckpointStore {
             }
             session.state.targetLock=lock;
             session.state.physicalTargetLock=physicalLock;
+            session.state.compatibilityTargetLock=compatibilityLock;
             return session;
         } catch (Exception | Error e) {
-            MysqlNamedLock.releaseAndClose(connection, lock, physicalLock);
+            MysqlNamedLock.releaseAndClose(connection, lock, physicalLock, compatibilityLock);
             if (e instanceof Error) throw (Error)e;
             throw new IllegalStateException("打开同步断点失败: " + e.getMessage(), e);
         }
+    }
+
+    private static boolean matchesPhysicalLock(String previous, String primary, String compatibility) {
+        return previous.equals(primary) || previous.equals(compatibility);
     }
 
     private static void requireWriteToken(String token) {
@@ -309,6 +333,7 @@ public class SyncCheckpointStore {
         private final Connection connection;
         private final String lock;
         private final String physicalLock;
+        private final String compatibilityLock;
         private final long taskId;
         private boolean exists;
         private volatile boolean closed;
@@ -326,14 +351,15 @@ public class SyncCheckpointStore {
         void onProgress(java.util.function.Consumer<State> listener) { this.progressListener = listener; }
         /** 仅用于替换轮次后的旧缓存清理；旧写入的终止信息以 State.pendingStopTokens 为准。 */
         public String previousToken;
-        private Session(Connection c, String lock, String physicalLock, long id) {
-            this.connection=c; this.lock=lock; this.physicalLock=physicalLock; this.taskId=id;
+        private Session(Connection c, String lock, String physicalLock, String compatibilityLock, long id) {
+            this.connection=c; this.lock=lock; this.physicalLock=physicalLock; this.compatibilityLock=compatibilityLock; this.taskId=id;
         }
 
         /** 连接重新获取、建表和授权后复核，不能持 A 实例的锁向 B 实例写入。 */
-        void requirePhysicalTarget(String target) {
+        void requirePhysicalTarget(String target, String compatibilityTarget) {
             checkLock();
-            if (physicalLock==null || !physicalLock.equals(lockName(target)))
+            if (physicalLock==null || !physicalLock.equals(lockName(target))
+                    || (compatibilityLock!=null && (compatibilityTarget==null || !compatibilityLock.equals(lockName(compatibilityTarget)))))
                 throw new IllegalStateException("目标连接的物理实例与同步锁不一致，已停止写入");
         }
 
@@ -361,10 +387,13 @@ public class SyncCheckpointStore {
         public void checkLock() {
             if (closed) throw new IllegalStateException("同步断点会话已关闭");
             try (PreparedStatement q=connection.prepareStatement("SELECT IS_USED_LOCK(?)=CONNECTION_ID()"
-                    + (physicalLock==null ? "" : " AND IS_USED_LOCK(?)=CONNECTION_ID()"))) {
+                    + (physicalLock==null ? "" : " AND IS_USED_LOCK(?)=CONNECTION_ID()")
+                    + (compatibilityLock==null ? "" : " AND IS_USED_LOCK(?)=CONNECTION_ID()"))) {
                 q.setQueryTimeout(5);
                 q.setString(1,lock);
-                if (physicalLock!=null) q.setString(2,physicalLock);
+                int parameter=2;
+                if (physicalLock!=null) q.setString(parameter++,physicalLock);
+                if (compatibilityLock!=null) q.setString(parameter,compatibilityLock);
                 try(ResultSet r=q.executeQuery()) {
                     if(!r.next() || r.getInt(1)!=1) throw new IllegalStateException("同步锁已失效，停止写入");
                 }
@@ -383,6 +412,10 @@ public class SyncCheckpointStore {
  */
         public void save() {
             checkLock();
+            // 基线接管等入口可以替换 state；落库的锁标识必须来自当前实际持锁的会话。
+            state.targetLock=lock;
+            state.physicalTargetLock=physicalLock;
+            state.compatibilityTargetLock=compatibilityLock;
             if(state.complete && state.pendingStopTokens!=null && !state.pendingStopTokens.isEmpty())
                 throw new IllegalStateException("旧写入尚未确认停止，不能确认本轮完成");
             state.updatedAtMs=System.currentTimeMillis();
@@ -411,7 +444,7 @@ public class SyncCheckpointStore {
         public synchronized void close() {
             if(closed) return;
             closed=true;
-            MysqlNamedLock.releaseAndClose(connection, lock, physicalLock);
+            MysqlNamedLock.releaseAndClose(connection, lock, physicalLock, compatibilityLock);
         }
     }
 }

@@ -41,8 +41,9 @@ RUN --mount=type=cache,id=el2ck-maven,target=/root/.m2,sharing=locked \
 
 # Runtime contains only the JRE, the packaged JAR, frontend assets and curl.
 FROM eclipse-temurin:8-jre-jammy
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+RUN sed -i 's|http://|https://|g' /etc/apt/sources.list \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 el2ck \
     && useradd --uid 10001 --gid el2ck --no-create-home el2ck

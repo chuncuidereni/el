@@ -48,6 +48,48 @@ def bundle_directory():
     return Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
 
 
+@contextmanager
+def windows_package_guard(wait_for_setup=False):
+    """Prevent Setup replacing bundle files while a launcher is using them.
+
+    Setup owns its mutex before checking AppMutex. Publish ours first, then
+    check Setup's, so simultaneous launches cannot slip past both checks.
+    The existing byte-range lock still serializes actual runtime operations.
+    """
+    if os.name != "nt":
+        yield
+        return
+    import ctypes
+    import time
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.OpenMutexW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.OpenMutexW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.CreateMutexW(None, False, r"Local\ELDataPlatform.Launcher")
+    if not handle:
+        raise RuntimeError("无法取得启动器安装保护锁")
+    try:
+        # The Finish-page launch happens just before Setup exits. Only that
+        # invocation waits for its mutex; ordinary launches fail immediately.
+        deadline = time.monotonic() + (30 if wait_for_setup else 0)
+        while True:
+            setup = kernel.OpenMutexW(0x00100000, False, r"Local\ELDataPlatform.Setup")
+            if not setup:
+                if ctypes.get_last_error() != 2:  # ERROR_FILE_NOT_FOUND is the only safe absence.
+                    raise RuntimeError("无法确认安装程序状态，请稍后重试")
+                break
+            kernel.CloseHandle(setup)
+            if time.monotonic() >= deadline:
+                raise RuntimeError("安装程序正在更新文件，请完成安装后再启动平台")
+            time.sleep(0.2)
+        yield
+    finally:
+        kernel.CloseHandle(handle)
+
+
 def private_directory(path):
     if path.is_symlink():
         raise RuntimeError("数据目录不能是符号链接")
@@ -212,7 +254,7 @@ def start(bundle, directory, runtime, state, prefix, env, browser):
         webbrowser.open("http://127.0.0.1:" + str(state["http_port"]))
 
 
-def main():
+def run_main():
     if os.name == "nt" and getattr(sys, "frozen", False):
         # PyInstaller adds its extraction directory to Windows DLL search. Child
         # system installers must load their own DLLs, not Python's bundled DLLs.
@@ -222,6 +264,7 @@ def main():
     parser.add_argument("action", nargs="?", default="start", choices=("start", "stop", "status", "logs", "login", "verify"))
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--no-pause", action="store_true")
+    parser.add_argument("--after-setup", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     code = 0
     try:
@@ -266,6 +309,17 @@ def main():
             except (EOFError, KeyboardInterrupt):
                 pass
     return code
+
+
+def main():
+    try:
+        with windows_package_guard(wait_for_setup="--after-setup" in sys.argv):
+            return run_main()
+    except RuntimeError as error:
+        print(str(error), file=sys.stderr)
+        if "--no-pause" not in sys.argv and sys.stdin.isatty():
+            input("\n按回车关闭启动器……")
+        return 1
 
 
 if __name__ == "__main__":

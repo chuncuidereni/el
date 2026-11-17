@@ -380,13 +380,16 @@ public class SyncEngine {
     /** 地址锁继续保护已有部署；新物理锁让 HTTP/native、IP/域名别名共享一个执行范围。 */
     private SyncCheckpointStore.Session openCheckpoint(SyncTask task, String legacyTarget, String fingerprint,
                                                        boolean restart, String retryToken) {
-        SyncTableIdentity.Target target=SyncTableIdentity.target(targetClient(task.getConnectionId()),task.getTargetDb(),task.getTargetTable());
-        return checkpoints.open(task.getId(),legacyTarget,fingerprint,restart,retryToken,false,target.lockKey,target.uuid);
+        CkClient client=targetClient(task.getConnectionId());
+        // 目标版本不具备安全重放能力时，在创建断点、采集大文件或读取大表前停止。
+        SyncBatchWriter.requireSynchronous(client);
+        SyncTableIdentity.Target target=SyncTableIdentity.target(client,task.getTargetDb(),task.getTargetTable());
+        return checkpoints.open(task.getId(),legacyTarget,fingerprint,restart,retryToken,false,target.lockKey,target.uuid,target.compatibilityLockKey);
     }
 
     private void checkPhysicalTarget(SyncTask task, CkClient client, SyncCheckpointStore.Session session) {
         SyncTableIdentity.Target target=SyncTableIdentity.target(client,task.getTargetDb(),task.getTargetTable());
-        session.requirePhysicalTarget(target.lockKey);
+        session.requirePhysicalTarget(target.lockKey,target.compatibilityLockKey);
     }
 
     /** 本地文件同步(csv/json/xlsx):Excel 先转临时 CSV,DuckDB 按扩展名解析。 */
@@ -762,6 +765,7 @@ public class SyncEngine {
                 seed.fingerprint=fingerprint; seed.sourceType=ds.getType(); seed.targetIdentity=existing.identity;
                 seed.targetDefinitionHash=existing.definitionHash;
                 seed.targetLock=session.state.targetLock; seed.physicalTargetLock=session.state.physicalTargetLock;
+                seed.compatibilityTargetLock=session.state.compatibilityTargetLock;
                 seed.initialized=true; seed.complete=true; seed.phase="已接管全量数据，等待增量执行";
                 // seed 表示可继承的边界，不把存量行数计入本任务“已写入”统计。
                 if(snapshot) { seed.snapshotBaseline=existing.watermark; seed.snapshotWatermark=existing.watermark; }

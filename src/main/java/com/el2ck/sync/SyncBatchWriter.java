@@ -85,9 +85,19 @@ final class SyncBatchWriter {
     }
 
     static void requireSynchronous(CkClient client) {
-        QueryResult async=client.query("SELECT value FROM system.settings WHERE name='async_insert'");
-        if(async.getRows().size()!=1 || !"0".equals(String.valueOf(async.getRows().get(0).get(0))))
-            throw new IllegalStateException("断点续传需要目标连接关闭 async_insert");
+        QueryResult settings=client.query("SELECT name,value FROM system.settings WHERE name IN ('async_insert','insert_deduplication_token')");
+        boolean hasToken=false;
+        for(List<Object> row:settings.getRows()) {
+            if(row.size()!=2) throw new IllegalStateException("目标 ClickHouse 写入能力检查结果异常");
+            String name=String.valueOf(row.get(0));
+            if("insert_deduplication_token".equals(name)) hasToken=true;
+            if("async_insert".equals(name) && !"0".equals(String.valueOf(row.get(1))))
+                throw new IllegalStateException("断点续传需要目标连接关闭 async_insert");
+        }
+        // 21.8 没有异步写入设置，但也没有自定义去重令牌。仅允许默认内容去重会吞掉
+        // 合法的重复行，不能把它当作相同能力；在采集源数据前明确提示目标要求。
+        if(!hasToken)
+            throw new IllegalStateException("目标 ClickHouse 缺少 insert_deduplication_token，无法保证断点重试不重复写入；请使用支持去重令牌的目标库（如内置 25.3），21.8 可继续作为源库");
     }
 
     private static List<Object> metadata(CkClient client,SyncTask task) {

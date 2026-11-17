@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--payload", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=ROOT / "release" / "public")
     parser.add_argument("--installer-cache", type=Path, default=ROOT / "release" / "installer-cache")
+    parser.add_argument("--windows-portable", action="store_true", help="Also produce a Windows portable ZIP (EXE is always built)")
     args = parser.parse_args()
     runtime = read_json(args.payload / "runtime.json")
     arch, version = architecture(), runtime["version"]
@@ -32,8 +33,11 @@ def main():
     name = "EL-" + version + ("-bundled" if system != "linux" else "") + "-" + system + "-" + arch
     args.output.mkdir(parents=True, exist_ok=True)
     archive = args.output / (name + ".zip")
-    if archive.exists():
-        raise RuntimeError("Refusing to overwrite a release archive: " + str(archive))
+    setup = args.output / ("EL-Setup-" + version + "-windows-" + arch + ".exe")
+    outputs = ([setup] + ([archive] if args.windows_portable else [])) if system == "windows" else [archive]
+    for artifact in outputs:
+        if artifact.exists():
+            raise RuntimeError("Refusing to overwrite a release artifact: " + str(artifact))
     installers, installer_paths = prepare(system, arch, args.installer_cache)
     with tempfile.TemporaryDirectory(prefix="el-launcher-") as temporary:
         work = Path(temporary)
@@ -73,16 +77,21 @@ def main():
             payload_paths[relative] = path
             files[relative] = sha256(path)
         (folder / "files.json").write_text(json.dumps(files, indent=2) + "\n", encoding="utf-8")
-        with zipfile.ZipFile(archive, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as output:
-            for path in folder.rglob("*"):
-                if path.is_file():
-                    output.write(path, name + "/" + path.relative_to(folder).as_posix())
-            for relative, path in payload_paths.items():
-                output.write(path, name + "/" + relative, compress_type=zipfile.ZIP_STORED if relative.endswith(".gz") else zipfile.ZIP_DEFLATED)
-        if archive.stat().st_size >= 2 * 1024 ** 3:
-            raise RuntimeError("Archive exceeds the GitHub Release per-asset limit; split the image payload before publishing")
-    archive.with_suffix(".zip.sha256").write_text(sha256(archive) + "  " + archive.name + "\n", encoding="ascii")
-    print("Public release ready: " + str(archive))
+        if system == "windows":
+            from windows_setup import build
+            build(folder, payload_paths, version, setup, args.installer_cache)
+        if archive in outputs:
+            with zipfile.ZipFile(archive, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as output:
+                for path in folder.rglob("*"):
+                    if path.is_file():
+                        output.write(path, name + "/" + path.relative_to(folder).as_posix())
+                for relative, path in payload_paths.items():
+                    output.write(path, name + "/" + relative, compress_type=zipfile.ZIP_STORED if relative.endswith(".gz") else zipfile.ZIP_DEFLATED)
+    for artifact in outputs:
+        if artifact.stat().st_size >= 2 * 1024 ** 3:
+            raise RuntimeError("Artifact exceeds the GitHub Release per-asset limit; reduce the payload before publishing")
+        artifact.with_suffix(artifact.suffix + ".sha256").write_text(sha256(artifact) + "  " + artifact.name + "\n", encoding="ascii")
+        print("Public release ready: " + str(artifact))
 
 
 if __name__ == "__main__":

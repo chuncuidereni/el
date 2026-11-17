@@ -142,7 +142,7 @@ def bundled_installer(root, role):
         raise RuntimeError("内置安装程序与当前系统不匹配")
     path = root / relative
     if root not in path.resolve().parents or path.is_symlink() or not path.is_file() or sha256(path) != entry.get("sha256"):
-        raise RuntimeError("内置安装程序缺失或已损坏，请重新解压完整运行包")
+        raise RuntimeError("内置安装程序缺失或已损坏，请重新安装；便携包请重新完整解压")
     return path
 
 
