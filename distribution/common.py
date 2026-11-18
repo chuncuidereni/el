@@ -11,7 +11,7 @@ import tarfile
 import uuid
 
 FORMAT = 1
-DATABASE_IMAGES = {"mysql": "mysql:8.0.46", "clickhouse": "clickhouse/clickhouse-server:25.3.14.14"}
+DATABASE_IMAGES = {"mysql": "mysql:8.0.46", "clickhouse": "clickhouse/clickhouse-server:26.8.38.9"}
 SECRET_KEYS = ("mysql_root_password", "mysql_password", "ck_password", "app_secret", "admin_password")
 
 
@@ -160,7 +160,8 @@ def verify_bundle(root):
             raise RuntimeError("Missing or unsafe bundle file: " + name)
         if not re.fullmatch(r"[a-f0-9]{64}", digest) or sha256(path) != digest:
             raise RuntimeError("Bundle checksum failed: " + name)
-    required = {"payload/runtime.json", "payload/images.tar.gz", "payload/mysql-init/001-schema.sh", "install-docker-linux.sh"}
+    required = {"payload/runtime.json", "payload/images.tar.gz", "payload/mysql-init/001-schema.sh",
+                "payload/schema/clickhouse-users.xml", "install-docker-linux.sh"}
     if not required.issubset(manifest):
         raise RuntimeError("Incomplete release bundle")
     if platform.system() in ("Windows", "Darwin"):
@@ -222,7 +223,10 @@ def compose_config(state, runtime, payload):
         "mysql": service("mysql", mysql_env, mysql_mounts,
                          command=["--character-set-server=utf8mb4", "--collation-server=utf8mb4_bin"],
                          healthcheck=health('MYSQL_PWD="$$MYSQL_PASSWORD" mysql --protocol=TCP -h127.0.0.1 -uel2ck eltock -Nse "SELECT ready FROM el_bundle_bootstrap WHERE id=1" | grep -qx 1', "90s")),
-        "clickhouse": service("clickhouse", ck_env, ["ck-data:/var/lib/clickhouse", "ck-logs:/var/log/clickhouse-server"],
+        "clickhouse": service("clickhouse", ck_env, ["ck-data:/var/lib/clickhouse", "ck-logs:/var/log/clickhouse-server",
+                              {"type": "bind", "source": str((payload / "schema" / "clickhouse-users.xml").resolve()),
+                               "target": "/etc/clickhouse-server/users.d/el-sync.xml", "read_only": True,
+                               "bind": {"create_host_path": False}}],
                               ulimits={"nofile": {"soft": 262144, "hard": 262144}},
                               healthcheck=health('clickhouse-client --host 127.0.0.1 --user "$$CLICKHOUSE_USER" --password "$$CLICKHOUSE_PASSWORD" --query "SELECT 1" | grep -qx 1')),
         "app": service("app", app_env, ["app-data:/app/data"], init=True, mem_limit="4g", stop_grace_period="60s",

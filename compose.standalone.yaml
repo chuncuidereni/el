@@ -50,7 +50,7 @@ services:
       start_period: 90s
       retries: 36
   clickhouse:
-    image: clickhouse/clickhouse-server:25.3.14.14
+    image: clickhouse/clickhouse-server:26.8.38.9
     restart: unless-stopped
     environment:
       CLICKHOUSE_DB: default
@@ -64,6 +64,12 @@ services:
     volumes:
       - standalone-ck-data:/var/lib/clickhouse
       - standalone-ck-logs:/var/log/clickhouse-server
+      - type: bind
+        source: ./docker/standalone/clickhouse-users.xml
+        target: /etc/clickhouse-server/users.d/el-sync.xml
+        read_only: true
+        bind:
+          create_host_path: false
     healthcheck:
       test: ["CMD-SHELL", "clickhouse-client --host 127.0.0.1 --user \"$$CLICKHOUSE_USER\" --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1' | grep -qx 1"]
       interval: 5s

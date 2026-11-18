@@ -10,7 +10,7 @@ import sys
 import tempfile
 import zipfile
 
-from common import architecture, read_json, schema_hash, sha256
+from common import DATABASE_IMAGES, architecture, read_json, schema_hash, sha256
 from build_installers import prepare
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +24,10 @@ def main():
     parser.add_argument("--windows-portable", action="store_true", help="Also produce a Windows portable ZIP (EXE is always built)")
     args = parser.parse_args()
     runtime = read_json(args.payload / "runtime.json")
+    if any(runtime.get("images", {}).get(role, {}).get("tag") != tag for role, tag in DATABASE_IMAGES.items()):
+        raise RuntimeError("Payload database versions are outdated; rebuild with distribution/build_images.py")
+    if not (args.payload / "schema" / "clickhouse-users.xml").is_file():
+        raise RuntimeError("Payload lacks ClickHouse synchronous-write configuration; rebuild the image payload")
     arch, version = architecture(), runtime["version"]
     if runtime["architecture"] != arch or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,80}", version):
         raise RuntimeError("Payload does not match build host architecture or has an invalid version")

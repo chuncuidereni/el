@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <profiles>
+        <default>
+            <!-- CK 26 enables async inserts by default. EL checkpoints require
+                 synchronous acknowledgement before recording confirmed rows. -->
+            <async_insert>0</async_insert>
+        </default>
+    </profiles>
+</clickhouse>

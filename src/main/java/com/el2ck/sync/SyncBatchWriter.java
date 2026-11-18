@@ -97,7 +97,7 @@ final class SyncBatchWriter {
         // 21.8 没有异步写入设置，但也没有自定义去重令牌。仅允许默认内容去重会吞掉
         // 合法的重复行，不能把它当作相同能力；在采集源数据前明确提示目标要求。
         if(!hasToken)
-            throw new IllegalStateException("目标 ClickHouse 缺少 insert_deduplication_token，无法保证断点重试不重复写入；请使用支持去重令牌的目标库（如内置 25.3），21.8 可继续作为源库");
+            throw new IllegalStateException("目标 ClickHouse 缺少 insert_deduplication_token，无法保证断点重试不重复写入；请使用支持去重令牌的目标库（如当前发行包内置版本），21.8 可继续作为源库");
     }
 
     private static List<Object> metadata(CkClient client,SyncTask task) {

@@ -104,6 +104,10 @@ def main():
         (schema / "archive" / matches[0].name).write_bytes(matches[0].read_bytes().replace(b"\r\n", b"\n"))
     for name in ("20261029_review_hardening.sql", "20261110_sync_run_logical_delete.sql"):
         (schema / name).write_bytes((ROOT / "docs" / "mysql" / name).read_bytes().replace(b"\r\n", b"\n"))
+    # Persist with the hashed bootstrap configuration, so it survives moving or
+    # uninstalling the EXE directory and cannot silently change between runs.
+    (schema / "clickhouse-users.xml").write_bytes(
+        (ROOT / "docker" / "standalone" / "clickhouse-users.xml").read_bytes().replace(b"\r\n", b"\n"))
     init = args.output / "mysql-init"
     init.mkdir()
     (init / "001-schema.sh").write_bytes((ROOT / "docker" / "standalone" / "mysql-init" / "001-schema.sh").read_bytes().replace(b"\r\n", b"\n"))
